@@ -1,22 +1,17 @@
-[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)
 
 
+| Supported Targets | ESP32-C6 | ESP32-H2 |
+| ----------------- |  -------- | -------- |
 
+# ACW02-ZB Zigbee Weather Station
 
+[![License: GPL v3](https://img.shields.io/badge/Software-GPLv3-blue.svg)](./LICENSE)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/Hardware-CC%20BY--NC--SA%204.0-green.svg)](./LICENSE-hardware)
 
-| Supported Targets | ESP32-C6 | ESP32-H2 || Supported Targets | ESP32-C6 | ESP32-H2 |
-
-| ----------------- |  -------- | -------- || ----------------- |  -------- | -------- |
-
-
-
-# ESP32 Zigbee Weather Station# ESP32 Zigbee Multi-Sensor Device
-
-
+# Project Description
 
 This project implements a comprehensive weather monitoring station using ESP32-C6 with Zigbee connectivity. The device is derived from the ZigbeeMultiSensor project and provides real-time environmental monitoring with multiple sensors.This project implements a comprehensive environmental monitoring device using ESP32-C6 with Zigbee connectivity. The device combines multiple sensors and actuators into a single Zigbee end-device with five distinct endpoints.
-
-
 
 This project is based on the examples provided in the ESP Zigbee SDK:This project is based on the exmaples provided in the ESP Zigbee SDK :
 
@@ -24,25 +19,14 @@ This project is based on the examples provided in the ESP Zigbee SDK:This projec
 
 * [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)* [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)
 
-
-
 ## Device Features## Device Features
 
-
-
 ### 🌐 Zigbee Endpoints Overview### 🌐 Zigbee Endpoints Overview
-
-
 
 | Endpoint | Device Type | Clusters | Description || Endpoint | Device Type | Clusters | Description |
 
 |----------|-------------|----------|-------------||----------|-------------|----------|-------------|
 
-| **1** | LED Strip Light | On/Off | Addressable LED strip (GPIO 8) with status indication || **1** | LED Strip Light | On/Off | Addressable LED strip (GPIO 8) with full on/off control |
-
-| **2** | GPIO LED Light | On/Off | Single GPIO LED (GPIO 0) for secondary status || **2** | GPIO LED Light | On/Off | Single GPIO LED (GPIO 0) for secondary lighting |
-
-| **3** | Button Sensor | Analog Input | External button (GPIO 12) with multi-action detection || **3** | Button Sensor | Analog Input | External button (GPIO 12) with multi-action detection |
 
 | **4** | Environmental Sensor | Temperature, Humidity, Pressure | BME280 sensor via I2C (GPIO 6/7) || **4** | Environmental Sensor | Temperature, Humidity, Pressure | BME280 sensor via I2C (GPIO 6/7) |
 
