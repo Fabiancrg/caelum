@@ -40,7 +40,11 @@ static const char *TAG = "WEATHER_STATION";
 //static const char *RAIN_TAG = "RAIN_GAUGE";
 
 /* Rain gauge configuration */
+#ifdef CONFIG_IDF_TARGET_ESP32H2
+#define RAIN_GAUGE_GPIO         12              // GPIO pin for rain gauge reed switch (RTC-capable on ESP32-H2)
+#else
 #define RAIN_GAUGE_GPIO         18              // GPIO pin for rain gauge reed switch
+#endif
 #define RAIN_MM_PER_PULSE       0.36f           // mm of rain per bucket tip (adjust for your sensor)
 #define RAIN_NVS_NAMESPACE      "rain_gauge"
 #define RAIN_NVS_KEY            "total_mm"
@@ -82,8 +86,13 @@ static esp_err_t deferred_driver_init(void)
     /* Initialize I2C and BME280 sensor */
     i2c_config_t i2c_cfg = {
         .mode = I2C_MODE_MASTER,
+#ifdef CONFIG_IDF_TARGET_ESP32H2
+        .sda_io_num = GPIO_NUM_1,      // ESP32-H2 I2C SDA
+        .scl_io_num = GPIO_NUM_2,      // ESP32-H2 I2C SCL
+#else
         .sda_io_num = GPIO_NUM_6,      // ESP32-C6 default I2C SDA
-        .scl_io_num = GPIO_NUM_7,      // ESP32-C6 default I2C SCL  
+        .scl_io_num = GPIO_NUM_7,      // ESP32-C6 default I2C SCL
+#endif
         .sda_pullup_en = GPIO_PULLUP_ENABLE,
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
         .master.clk_speed = 100000,    // 100 KHz
@@ -98,10 +107,14 @@ static esp_err_t deferred_driver_init(void)
     esp_err_t ret = bme280_app_init(i2c_bus);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize BME280 sensor: %s", esp_err_to_name(ret));
-        // Don't fail completely if BME280 is not connected
+        /* Don't fail completely if BME280 is not connected */
         ESP_LOGW(TAG, "Continuing without BME280 sensor");
     } else {
-        ESP_LOGI(TAG, "BME280 sensor initialized successfully");
+#ifdef CONFIG_IDF_TARGET_ESP32H2
+        ESP_LOGI(TAG, "BME280 sensor initialized successfully on ESP32-H2 (SDA:GPIO1, SCL:GPIO2)");
+#else
+        ESP_LOGI(TAG, "BME280 sensor initialized successfully on ESP32-C6 (SDA:GPIO6, SCL:GPIO7)");
+#endif
     }
     
     /* Initialize rain gauge */

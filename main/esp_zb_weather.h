@@ -26,7 +26,11 @@
 /* Deep sleep configuration for battery operation */
 #define SLEEP_DURATION_MINUTES          15                                   /* Wake up every 15 minutes for periodic reporting */
 #define SLEEP_DURATION_S                (SLEEP_DURATION_MINUTES * 60)
+#ifdef CONFIG_IDF_TARGET_ESP32H2
+#define RAIN_WAKE_GPIO                  GPIO_NUM_12                          /* GPIO for rain gauge wake-up (RTC-capable on ESP32-H2) */
+#else
 #define RAIN_WAKE_GPIO                  GPIO_NUM_18                          /* GPIO for rain gauge wake-up */
+#endif
 #define RAIN_MM_THRESHOLD               1.0f                                 /* Wake up immediately if rain > 1mm */
 
 /* Basic manufacturer information */
