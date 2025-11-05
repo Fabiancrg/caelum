@@ -13,18 +13,14 @@
  */
 
 #include "esp_zigbee_core.h"
-#include "weather_driver.h"
 #include "zcl_utility.h"
 
 /* Zigbee configuration */
 #define INSTALLCODE_POLICY_ENABLE       false                                /* enable the install code policy for security */
 #define ED_AGING_TIMEOUT                ESP_ZB_ED_AGING_TIMEOUT_8MIN         /* aging timeout for sleepy end device */
 #define ED_KEEP_ALIVE                   15000                                /* 15000 millisecond - poll parent every 15s */
-#define HA_ESP_LIGHT1_ENDPOINT          1                                    /* esp light bulb device endpoint, used to process light controlling commands */
-#define HA_ESP_LIGHT2_ENDPOINT          2                                    /* esp light bulb device endpoint 2, used to process light controlling commands */
-#define HA_ESP_BUTTON_ENDPOINT          3                                    /* esp button sensor endpoint */
-#define HA_ESP_BME280_ENDPOINT          4                                    /* esp BME280 environmental sensor endpoint */
-#define HA_ESP_RAIN_GAUGE_ENDPOINT      5                                    /* esp rain gauge sensor endpoint */
+#define HA_ESP_BME280_ENDPOINT          1                                    /* esp BME280 environmental sensor endpoint */
+#define HA_ESP_RAIN_GAUGE_ENDPOINT      2                                    /* esp rain gauge sensor endpoint */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK /* Zigbee primary channel mask use in the example */
 
 /* Deep sleep configuration for battery operation */

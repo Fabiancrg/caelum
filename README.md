@@ -23,31 +23,12 @@ This project is based on the examples provided in the ESP Zigbee SDK:
 
 | Endpoint | Device Type | Clusters | Description |
 |----------|-------------|----------|-------------|
-| **1** | LED Strip Controller | On/Off | WS2812B LED strip on GPIO 8 |
-| **2** | GPIO LED | On/Off | Standard LED on GPIO 0 |
-| **3** | Smart Button | Analog Input | Multi-action button on GPIO 12 |
-| **4** | Environmental Sensor | Temperature, Humidity, Pressure | BME280 sensor via I2C (GPIO 6/7) |
-| **5** | Rain Gauge | Analog Input | Tipping bucket rain sensor (GPIO 18) with rainfall totals |
+| **1** | Environmental Sensor | Temperature, Humidity, Pressure | BME280 sensor via I2C (GPIO 6/7) |
+| **2** | Rain Gauge | Analog Input | Tipping bucket rain sensor (GPIO 18) with rainfall totals |
 
-### 📋 Detailed Endpoint Descriptions#### **Endpoint 1: LED Strip Controller** 
-- **Hardware**: WS2812B-compatible LED strip on GPIO 8
-- **Functionality**: Full on/off control with Zigbee integration
-- **Features**: Hardware state tracking, button toggle support
-- **Use Case**: Primary lighting control and status indication
+### 📋 Detailed Endpoint Descriptions
 
-#### **Endpoint 2: GPIO LED Controller**
-- **Hardware**: Standard LED on GPIO 0  
-- **Functionality**: Simple on/off switching
-- **Features**: Independent control from LED strip
-- **Use Case**: Secondary status indicator or backup lighting
-
-#### **Endpoint 3: Smart Button Interface**
-- **Hardware**: Push button on GPIO 12
-- **Functionality**: Multi-action detection (single, double, hold, release)
-- **Features**: Debounced input, action encoding, press counting
-- **Use Case**: User interface for device control and interaction
-
-#### **Endpoint 4: Environmental Monitoring**
+#### **Endpoint 1: Environmental Monitoring**
 - **Hardware**: BME280 sensor via I2C (SDA: GPIO 6, SCL: GPIO 7)
 - **Measurements**: 
   - 🌡️ **Temperature**: -40°C to +85°C (±1°C accuracy)
@@ -56,7 +37,7 @@ This project is based on the examples provided in the ESP Zigbee SDK:
 - **Features**: Automatic 30-second reporting, Zigbee-standard units
 - **Use Case**: Weather monitoring, HVAC automation, air quality tracking
 
-#### **Endpoint 5: Rain Gauge System**
+#### **Endpoint 2: Rain Gauge System**
 - **Hardware**: Tipping bucket rain gauge on GPIO 18
 - **Measurements**: Cumulative rainfall in millimeters (0.36mm per tip)
 - **Features**: 
@@ -75,22 +56,18 @@ This project is based on the examples provided in the ESP Zigbee SDK:
 #### **Required Components**
 - ESP32-C6 or ESP32-H2 development board
 - BME280 environmental sensor module
-- WS2812B LED strip (at least 1 LED)
-- Standard LED + resistor
-- Push button + pull-up resistor  
 - Tipping bucket rain gauge with reed switch
 - Zigbee coordinator (ESP32-H2 or commercial gateway)
 
 #### **Pin Assignments**
 ```
-GPIO 0  - GPIO LED output
 GPIO 6  - I2C SDA (BME280)
 GPIO 7  - I2C SCL (BME280) 
-GPIO 8  - LED strip data (WS2812B)
 GPIO 9  - Built-in button (factory reset)
-GPIO 12 - External button input
-GPIO 18 - Rain gauge input (reed switch)
+GPIO 18 - Rain gauge input (reed switch)*
 ```
+
+*Note: GPIO18 is not RTC-capable on ESP32-C6, so rain detection during deep sleep is not available. Rain will be detected during the 15-minute timer wake-ups.
 
 ### � Zigbee Integration
 - **Protocol**: Zigbee 3.0  
@@ -103,8 +80,9 @@ GPIO 18 - Rain gauge input (reed switch)
 - **Deep Sleep Mode**: 15-minute wake intervals for battery operation
 - **Wake-up Sources**:
   - Timer (15 minutes for periodic updates)
-  - Rain detection (>1mm triggers immediate wake)
-  - Button press (user interaction)
+  - Rain detection (limited to timer wake-ups on ESP32-C6)*
+
+*ESP32-H2 supports rain detection during sleep, ESP32-C6 detects rain only during timer wake-ups
 - **Battery Life**: Optimized for extended operation on battery power
 - **Power Consumption**: ~100mA active, <100µA in deep sleep
 
@@ -139,15 +117,9 @@ idf.py -p [PORT] flash monitor
 
 ### Device Operation
 
-#### **Button Controls**
+#### **Factory Reset**
 - **Built-in Button (GPIO 9)**:
   - Long press (5s): Factory reset device
-- **External Button (GPIO 12)**: 
-  - Single press: Reported to Zigbee
-  - Double press: Reported to Zigbee
-  - Hold: Reported to Zigbee
-  - Release after hold: Reported to Zigbee
-  - Short press: Toggle LED strip on/off
 
 #### **Automatic Features**
 - Environmental data reported every 30 seconds (when awake)
@@ -159,7 +131,6 @@ idf.py -p [PORT] flash monitor
 ### 📡 Data Reporting
 - **Temperature/Humidity/Pressure**: Reported during wake cycles
 - **Rainfall**: Immediate on tip detection (>1mm) or hourly
-- **Button Events**: Immediate (single, double, hold, release)
 - **Sleep Cycle**: 15-minute intervals for battery conservation
 
 ## 📊 Example Output
@@ -190,13 +161,6 @@ I (8040) WEATHER_STATION: 📡 Humidity: 45.2%
 I (8050) WEATHER_STATION: 📡 Pressure: 1013.3 hPa
 ```
 
-### Button Interactions  
-```
-I (9000) WEATHER_STATION: 🔘 External button action detected: single
-I (9010) WEATHER_STATION: ✅ Button action single sent (encoded: 1001.0) - press #1
-I (9020) WEATHER_STATION: 📡 Button: single (#1)
-```
-
 ### Rain Gauge Activity
 ```  
 I (10000) RAIN_GAUGE: 🔍 Rain gauge interrupt received on GPIO18 (enabled: YES)
@@ -215,8 +179,6 @@ I (18010) WEATHER_STATION: 💤 Entering deep sleep for 900 seconds (15 minutes)
 
 When connected to Zigbee2MQTT or other Zigbee coordinators, the device appears as:
 
-- **2x Switch entities**: LED Strip & GPIO LED control
-- **1x Sensor entity**: Button actions with press counter
 - **3x Sensor entities**: Temperature, Humidity, Pressure  
 - **1x Sensor entity**: Rainfall total with automatic updates
 
@@ -270,11 +232,6 @@ WeatherStation/
 - Verify BME280 I2C address (default: 0x76 or 0x77)
 - Ensure proper power supply to sensor (3.3V)
 
-#### **Button Not Responding**
-- Verify button connections and pull-up resistors
-- Check GPIO 12 (external) and GPIO 9 (built-in) functionality
-- Ensure proper debouncing in hardware
-
 #### **Zigbee Connection Issues**
 - Perform factory reset with long press (5s) on built-in button
 - Ensure Zigbee coordinator is in pairing mode
@@ -282,7 +239,7 @@ WeatherStation/
 
 #### **Device Not Waking from Sleep**
 - Check battery voltage (minimum 3.0V recommended)
-- Verify wake-up sources (timer, rain gauge, button)
+- Verify wake-up sources (timer, rain gauge)
 - Review sleep manager logs for errors
 
 ### 📋 Development Notes

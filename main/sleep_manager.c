@@ -82,7 +82,13 @@ void configure_gpio_wakeup(gpio_num_t gpio_num, int level)
 {
     ESP_LOGI(SLEEP_TAG, "Configuring GPIO%d for wake-up on %s", gpio_num, level ? "HIGH" : "LOW");
     
-    /* For ESP32-H2, we need to use ext1 wake-up for GPIO wake-up */
+    /* Check if GPIO is RTC capable first */
+    if (!rtc_gpio_is_valid_gpio(gpio_num)) {
+        ESP_LOGW(SLEEP_TAG, "⚠️  GPIO%d is not RTC capable - rain detection during sleep disabled", gpio_num);
+        ESP_LOGI(SLEEP_TAG, "ℹ️  Rain will only be detected when device is awake (timer-based wake-ups every 15min)");
+        return;
+    }
+    
     /* Configure the GPIO as input with pull-down (for active-high rain gauge) */
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << gpio_num),
@@ -94,9 +100,13 @@ void configure_gpio_wakeup(gpio_num_t gpio_num, int level)
     gpio_config(&io_conf);
     
     /* Enable wake-up on this GPIO going HIGH */
-    esp_sleep_enable_ext1_wakeup((1ULL << gpio_num), ESP_EXT1_WAKEUP_ANY_HIGH);
-    
-    ESP_LOGI(SLEEP_TAG, "✅ GPIO%d wake-up configured (trigger on HIGH)", gpio_num);
+    esp_err_t ret = esp_sleep_enable_ext1_wakeup((1ULL << gpio_num), ESP_EXT1_WAKEUP_ANY_HIGH);
+    if (ret == ESP_OK) {
+        ESP_LOGI(SLEEP_TAG, "✅ GPIO%d wake-up configured (trigger on HIGH)", gpio_num);
+    } else {
+        ESP_LOGE(SLEEP_TAG, "❌ Failed to configure GPIO%d wake-up: %s", gpio_num, esp_err_to_name(ret));
+        ESP_LOGI(SLEEP_TAG, "ℹ️  Rain will only be detected during timer wake-ups");
+    }
 }
 
 /**
@@ -183,8 +193,14 @@ void enter_deep_sleep(uint32_t duration_seconds, bool enable_gpio_wakeup)
     }
     
     /* Configure GPIO wake-up for rain detection */
+    bool gpio_wakeup_enabled = false;
     if (enable_gpio_wakeup) {
-        configure_gpio_wakeup(RAIN_WAKE_GPIO, 1); // Wake on HIGH (rain pulse)
+        if (rtc_gpio_is_valid_gpio(RAIN_WAKE_GPIO)) {
+            configure_gpio_wakeup(RAIN_WAKE_GPIO, 1); // Wake on HIGH (rain pulse)
+            gpio_wakeup_enabled = true;
+        } else {
+            ESP_LOGW(SLEEP_TAG, "⚠️  Rain wake-up not available (GPIO%d not RTC capable)", RAIN_WAKE_GPIO);
+        }
     }
     
     /* Disable LEDs to save power */
@@ -200,8 +216,11 @@ void enter_deep_sleep(uint32_t duration_seconds, bool enable_gpio_wakeup)
     if (duration_seconds > 0) {
         ESP_LOGI(SLEEP_TAG, "  ⏰ Timer: every %lu minutes", duration_seconds / 60);
     }
-    if (enable_gpio_wakeup) {
+    if (gpio_wakeup_enabled) {
         ESP_LOGI(SLEEP_TAG, "  🌧️ Rain: GPIO%d (>%.1f mm)", RAIN_WAKE_GPIO, RAIN_MM_THRESHOLD);
+    } else if (enable_gpio_wakeup) {
+        ESP_LOGI(SLEEP_TAG, "  🌧️ Rain: DISABLED (GPIO%d not RTC capable)", RAIN_WAKE_GPIO);
+        ESP_LOGI(SLEEP_TAG, "      Rain detection limited to timer wake-ups only");
     }
     
     /* Flush all logs before sleeping */

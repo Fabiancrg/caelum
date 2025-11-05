@@ -22,6 +22,7 @@
 #include "bme280_app.h"
 #include "i2c_bus.h"
 #include "nvs.h"
+#include "weather_driver.h"
 
 /* Define multistate input cluster constants if not available */
 #ifndef ESP_ZB_ZCL_CLUSTER_ID_MULTISTATE_INPUT
@@ -58,9 +59,6 @@ static TickType_t last_report_time = 0;  // Track last report time for hourly re
 
 /********************* Define functions **************************/
 static void builtin_button_callback(button_action_t action);
-static void external_button_callback(button_action_t action);
-static void external_button_zigbee_update(uint8_t param);
-static void builtin_button_zigbee_update(uint8_t param);
 static void factory_reset_device(uint8_t param);
 static void bme280_read_and_report(uint8_t param);
 static void rain_gauge_init(void);
@@ -75,17 +73,9 @@ static bool rain_gauge_should_report(void);
 static void rain_gauge_hourly_check(uint8_t param);
 static esp_err_t deferred_driver_init(void)
 {
-    light_driver_init(LIGHT_DEFAULT_OFF);
-    
-    /* Initialize builtin button with callback */
+    /* Initialize builtin button with callback for factory reset */
     if (!builtin_button_driver_init(builtin_button_callback)) {
         ESP_LOGE(TAG, "Failed to initialize builtin button driver");
-        return ESP_FAIL;
-    }
-    
-    /* Initialize external button with callback */
-    if (!external_button_driver_init(external_button_callback)) {
-        ESP_LOGE(TAG, "Failed to initialize external button driver");
         return ESP_FAIL;
     }
     
@@ -181,31 +171,15 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message)
 {
     esp_err_t ret = ESP_OK;
-    bool light_state = 0;
 
     ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
     ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG, "Received message: error status(%d)",
                         message->info.status);
     ESP_LOGI(TAG, "Received message: endpoint(%d), cluster(0x%x), attribute(0x%x), data size(%d)", message->info.dst_endpoint, message->info.cluster,
              message->attribute.id, message->attribute.data.size);
-    if (message->info.dst_endpoint == HA_ESP_LIGHT1_ENDPOINT) {
-        if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
-                light_state = message->attribute.data.value ? *(bool *)message->attribute.data.value : light_state;
-                ESP_LOGI(TAG, "Light 1 sets to %s", light_state ? "On" : "Off");
-                light_driver_set_power(light_state);
-            }
-        }
-    }
-    if (message->info.dst_endpoint == HA_ESP_LIGHT2_ENDPOINT) {
-        if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
-                light_state = message->attribute.data.value ? *(bool *)message->attribute.data.value : light_state;
-                ESP_LOGI(TAG, "Light 2 sets to %s", light_state ? "On" : "Off");
-                light_driver_set_gpio_power(light_state);
-            }
-        }
-    }
+    
+    /* No attribute handling needed for read-only sensor endpoints */
+    
     return ret;
 }
 
@@ -227,26 +201,13 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             esp_zb_zcl_report_attr_message_t *report_attr_message = (esp_zb_zcl_report_attr_message_t *)message;
             
             // Simplified logging - only show key information
-            if (report_attr_message->cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
-                bool state = report_attr_message->attribute.data.value ? 
-                           *(bool*)report_attr_message->attribute.data.value : false;
-                ESP_LOGI(TAG, "📡 LED%d: %s", report_attr_message->dst_endpoint, state ? "ON" : "OFF");
-            } else if (report_attr_message->cluster == ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT) {
+            if (report_attr_message->cluster == ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT) {
                 float analog_value = report_attr_message->attribute.data.value ? 
                                     *(float*)report_attr_message->attribute.data.value : 0.0f;
                 
                 if (report_attr_message->attribute.id == ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID) {
                     /* Check which endpoint this is from */
-                    if (report_attr_message->dst_endpoint == HA_ESP_BUTTON_ENDPOINT) {
-                        /* Decode: action = value / 1000, counter = value % 1000 */
-                        const char* action_names[] = {"none", "single", "double", "hold", "release_after_hold"};
-                        int action_idx = (int)analog_value / 1000;
-                        int counter = (int)analog_value % 1000;
-                        
-                        if (action_idx >= 1 && action_idx < 5) {
-                            ESP_LOGI(TAG, "📡 Button: %s (#%d)", action_names[action_idx], counter);
-                        }
-                    } else if (report_attr_message->dst_endpoint == HA_ESP_RAIN_GAUGE_ENDPOINT) {
+                    if (report_attr_message->dst_endpoint == HA_ESP_RAIN_GAUGE_ENDPOINT) {
                         /* This is rain gauge total rainfall */
                         ESP_LOGI(TAG, "📡 Rain: %.2f mm", analog_value);
                     }
@@ -317,96 +278,7 @@ static void esp_zb_task(void *pvParameters)
     
     /* Create endpoint list */
     esp_zb_ep_list_t *esp_zb_ep_list = esp_zb_ep_list_create();
-    
-    /* Create first light endpoint (LED strip) */
-    esp_zb_on_off_light_cfg_t light1_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_cluster_list_t *esp_zb_light1_clusters = esp_zb_on_off_light_clusters_create(&light1_cfg);
-    
-    /* Add optional attributes to Basic cluster for endpoint 1 */
-    esp_zb_attribute_list_t *basic1_cluster = esp_zb_cluster_list_get_cluster(esp_zb_light1_clusters, ESP_ZB_ZCL_CLUSTER_ID_BASIC, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    if (basic1_cluster) {
-        uint8_t app_version = 1;
-        uint8_t stack_version = 1; 
-        uint8_t hw_version = 1;
-        char date_code[] = "\x08""20251011";     // Length-prefixed: 8 bytes + "20251011"
-        char sw_build_id[] = "\x06""v5.5.1";    // Length-prefixed: 6 bytes + "v5.5.1"
-        
-        esp_zb_basic_cluster_add_attr(basic1_cluster, ESP_ZB_ZCL_ATTR_BASIC_APPLICATION_VERSION_ID, &app_version);
-        esp_zb_basic_cluster_add_attr(basic1_cluster, ESP_ZB_ZCL_ATTR_BASIC_STACK_VERSION_ID, &stack_version);
-        esp_zb_basic_cluster_add_attr(basic1_cluster, ESP_ZB_ZCL_ATTR_BASIC_HW_VERSION_ID, &hw_version);
-        esp_zb_basic_cluster_add_attr(basic1_cluster, ESP_ZB_ZCL_ATTR_BASIC_DATE_CODE_ID, date_code);
-        esp_zb_basic_cluster_add_attr(basic1_cluster, ESP_ZB_ZCL_ATTR_BASIC_SW_BUILD_ID, sw_build_id);
-    }
-    
-    esp_zb_endpoint_config_t endpoint1_config = {
-        .endpoint = HA_ESP_LIGHT1_ENDPOINT,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
-        .app_device_version = 0
-    };
-    esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_light1_clusters, endpoint1_config);
-    
-    /* Create second light endpoint (GPIO LED) */
-    esp_zb_on_off_light_cfg_t light2_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_cluster_list_t *esp_zb_light2_clusters = esp_zb_on_off_light_clusters_create(&light2_cfg);
-    
-    /* Add optional attributes to Basic cluster for endpoint 2 */
-    esp_zb_attribute_list_t *basic2_cluster = esp_zb_cluster_list_get_cluster(esp_zb_light2_clusters, ESP_ZB_ZCL_CLUSTER_ID_BASIC, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    if (basic2_cluster) {
-        uint8_t app_version = 1;
-        uint8_t stack_version = 1; 
-        uint8_t hw_version = 1;
-        char date_code[] = "\x08""20251011";     // Length-prefixed: 8 bytes + "20251011"
-        char sw_build_id[] = "\x06""v5.5.1";    // Length-prefixed: 6 bytes + "v5.5.1"
-        
-        esp_zb_basic_cluster_add_attr(basic2_cluster, ESP_ZB_ZCL_ATTR_BASIC_APPLICATION_VERSION_ID, &app_version);
-        esp_zb_basic_cluster_add_attr(basic2_cluster, ESP_ZB_ZCL_ATTR_BASIC_STACK_VERSION_ID, &stack_version);
-        esp_zb_basic_cluster_add_attr(basic2_cluster, ESP_ZB_ZCL_ATTR_BASIC_HW_VERSION_ID, &hw_version);
-        esp_zb_basic_cluster_add_attr(basic2_cluster, ESP_ZB_ZCL_ATTR_BASIC_DATE_CODE_ID, date_code);
-        esp_zb_basic_cluster_add_attr(basic2_cluster, ESP_ZB_ZCL_ATTR_BASIC_SW_BUILD_ID, sw_build_id);
-    }
-    
-    esp_zb_endpoint_config_t endpoint2_config = {
-        .endpoint = HA_ESP_LIGHT2_ENDPOINT,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID,
-        .app_device_version = 0
-    };
-    esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_light2_clusters, endpoint2_config);
-    
-    /* Create button sensor endpoint (Binary Input) */
-    esp_zb_cluster_list_t *esp_zb_button_clusters = esp_zb_zcl_cluster_list_create();
-    
-    /* Create Basic cluster for button endpoint */
-    esp_zb_basic_cluster_cfg_t basic_button_cfg = {
-        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
-        .power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_DEFAULT_VALUE,
-    };
-    esp_zb_attribute_list_t *esp_zb_basic_button_cluster = esp_zb_basic_cluster_create(&basic_button_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(esp_zb_button_clusters, esp_zb_basic_button_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    
-    /* Create Analog Input cluster for button (multistate not available) */
-    esp_zb_analog_input_cluster_cfg_t button_analog_cfg = {
-        .present_value = 0,  // Will be set to encoded action + counter
-    };
-    esp_zb_attribute_list_t *esp_zb_button_analog_cluster = esp_zb_analog_input_cluster_create(&button_analog_cfg);
-    
-    /* Add description attribute */
-    char button_description[] = "\x0D""Button Action";  // Length-prefixed: 13 bytes + "Button Action"
-    esp_zb_analog_input_cluster_add_attr(esp_zb_button_analog_cluster, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_DESCRIPTION_ID, button_description);
-    
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_input_cluster(esp_zb_button_clusters, esp_zb_button_analog_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    
-    /* Add Identify cluster for button endpoint */
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(esp_zb_button_clusters, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    
-    esp_zb_endpoint_config_t endpoint_button_config = {
-        .endpoint = HA_ESP_BUTTON_ENDPOINT,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
-        .app_device_version = 0
-    };
-    esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_button_clusters, endpoint_button_config);
+
 
     /* Create BME280 environmental sensor endpoint */
     esp_zb_cluster_list_t *esp_zb_bme280_clusters = esp_zb_zcl_cluster_list_create();
@@ -498,20 +370,17 @@ static void esp_zb_task(void *pvParameters)
         .manufacturer_name = ESP_MANUFACTURER_NAME,
         .model_identifier = ESP_MODEL_IDENTIFIER,
     };
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_LIGHT1_ENDPOINT, &info);
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_LIGHT2_ENDPOINT, &info);
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_BUTTON_ENDPOINT, &info);
     esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_BME280_ENDPOINT, &info);
     esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_RAIN_GAUGE_ENDPOINT, &info);
 
-    /* Add OTA cluster to endpoint 1 for firmware updates */
+    /* Add OTA cluster to BME280 endpoint for firmware updates */
     esp_zb_ota_cluster_cfg_t ota_cluster_cfg = {
         .ota_upgrade_manufacturer = OTA_UPGRADE_MANUFACTURER,
         .ota_upgrade_image_type = OTA_UPGRADE_IMAGE_TYPE,
     };
     esp_zb_attribute_list_t *esp_zb_ota_client_cluster = esp_zb_ota_cluster_create(&ota_cluster_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_ota_cluster(esp_zb_light1_clusters, esp_zb_ota_client_cluster, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
-    ESP_LOGI(TAG, "📦 OTA cluster added to endpoint %d", HA_ESP_LIGHT1_ENDPOINT);
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_ota_cluster(esp_zb_bme280_clusters, esp_zb_ota_client_cluster, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
+    ESP_LOGI(TAG, "📦 OTA cluster added to endpoint %d", HA_ESP_BME280_ENDPOINT);
 
     esp_zb_device_register(esp_zb_ep_list);
     esp_zb_core_action_handler_register(zb_action_handler);
@@ -534,6 +403,23 @@ static void esp_zb_task(void *pvParameters)
 
 
 /* Factory reset function */
+static void builtin_button_callback(button_action_t action)
+{
+    const char* action_names[] = {
+        "none", "single", "double", "hold", "release_after_hold"
+    };
+    
+    if (action != BUTTON_ACTION_NONE && action < (sizeof(action_names)/sizeof(action_names[0]))) {
+        ESP_LOGI(TAG, "🔘 Builtin button action detected: %s", action_names[action]);
+        
+        if (action == BUTTON_ACTION_HOLD) {
+            /* Long press detected - Factory reset */
+            ESP_LOGW(TAG, "🔄 Factory reset triggered by long press - device will restart and rejoin network");
+            esp_zb_scheduler_alarm((esp_zb_callback_t)factory_reset_device, 0, 100);
+        }
+    }
+}
+
 static void factory_reset_device(uint8_t param)
 {
     ESP_LOGW(TAG, "🔄 Performing factory reset...");
@@ -548,111 +434,7 @@ static void factory_reset_device(uint8_t param)
     esp_restart();
 }
 
-/* Deferred function for safe Zigbee calls */
-static void builtin_button_zigbee_update(uint8_t param)
-{
-    /* Read current LED state directly from hardware driver */
-    bool current_led_state = light_driver_get_power();
-    
-    /* Toggle the state */
-    bool new_led_state = !current_led_state;
-    ESP_LOGI(TAG, "Toggling LED strip from %s to %s", current_led_state ? "ON" : "OFF", new_led_state ? "ON" : "OFF");
-    
-    /* Update the hardware immediately */
-    light_driver_set_power(new_led_state);
-    
-    /* Check if device is connected to network for Zigbee reporting */
-    uint16_t short_addr = esp_zb_get_short_address();
-    if (short_addr == 0xFFFF || short_addr == 0x0000) {
-        ESP_LOGW(TAG, "⚠️ Device not connected to Zigbee network (addr: 0x%04x), LED toggled locally only", short_addr);
-        return;
-    }
-    
-    /* Add small delay to ensure Zigbee stack is ready */
-    vTaskDelay(pdMS_TO_TICKS(10));
-    
-    /* Update the Zigbee attribute and force reporting */
-    esp_err_t ret = esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT1_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, 
-                               ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, 
-                               &new_led_state, true);  // Force immediate reporting
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "✅ LED strip toggled to %s and reported to Zigbee", new_led_state ? "ON" : "OFF");
-    } else {
-        /* Try without forced reporting as fallback (0x88 is common when forced reporting not available) */
-        ESP_LOGD(TAG, "Forced reporting failed (0x%x), trying without reporting...", ret);
-        ret = esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT1_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, 
-                                   ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, 
-                                   &new_led_state, false);  // No forced reporting
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "✅ LED strip toggled to %s (Zigbee attribute updated)", new_led_state ? "ON" : "OFF");
-        } else {
-            ESP_LOGE(TAG, "❌ Zigbee attribute update failed: 0x%x", ret);
-        }
-    }
-}
 
-static void builtin_button_callback(button_action_t action)
-{
-    const char* action_names[] = {
-        "none", "single", "double", "hold", "release_after_hold"
-    };
-    
-    if (action != BUTTON_ACTION_NONE && action < (sizeof(action_names)/sizeof(action_names[0]))) {
-        ESP_LOGI(TAG, "🔘 Builtin button action detected: %s", action_names[action]);
-        
-        if (action == BUTTON_ACTION_HOLD) {
-            /* Long press detected - Factory reset */
-            ESP_LOGW(TAG, "🔄 Factory reset triggered by long press - device will restart and rejoin network");
-            esp_zb_scheduler_alarm((esp_zb_callback_t)factory_reset_device, 0, 100);
-        } else if (action == BUTTON_ACTION_SINGLE) {
-            /* Short press - Toggle LED strip */
-            ESP_LOGI(TAG, "💡 Short press - scheduling LED strip toggle");
-            esp_zb_scheduler_alarm((esp_zb_callback_t)builtin_button_zigbee_update, 0, 1);
-        }
-    }
-}
-
-/* Deferred function for safe Zigbee calls for external button */
-static void external_button_zigbee_update(uint8_t param)
-{
-    button_action_t action = (button_action_t)param;
-    const char* action_names[] = {
-        "none", "single", "double", "hold", "release_after_hold"
-    };
-    
-    if (action != BUTTON_ACTION_NONE && action < (sizeof(action_names)/sizeof(action_names[0]))) {
-        static uint32_t button_counter = 0;
-        button_counter++;
-        
-        /* Encode: (action * 1000) + (counter % 1000) to ensure unique values */
-        float encoded_value = (float)((action * 1000) + (button_counter % 1000));
-        
-        esp_err_t ret = esp_zb_zcl_set_attribute_val(HA_ESP_BUTTON_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT, 
-                                   ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, 
-                                   &encoded_value, true);  // Force immediate reporting
-        
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "✅ Button action %s sent (encoded: %.0f) - press #%u", 
-                     action_names[action], encoded_value, button_counter);
-        } else {
-            ESP_LOGE(TAG, "❌ Failed to send button action: %s", esp_err_to_name(ret));
-        }
-    }
-}
-
-static void external_button_callback(button_action_t action)
-{
-    const char* action_names[] = {
-        "none", "single", "double", "hold", "release_after_hold"
-    };
-    
-    if (action != BUTTON_ACTION_NONE && action < (sizeof(action_names)/sizeof(action_names[0]))) {
-        ESP_LOGI(TAG, "🔘 External button action detected: %s - scheduling Zigbee update", action_names[action]);
-        
-        /* Schedule the Zigbee update to run in the Zigbee task context */
-        esp_zb_scheduler_alarm((esp_zb_callback_t)external_button_zigbee_update, (uint8_t)action, 1);
-    }
-}
 
 /* BME280 sensor reading and reporting functions */
 static void bme280_read_and_report(uint8_t param)
@@ -1012,9 +794,13 @@ static void rain_gauge_init(void)
     
     /* Install GPIO ISR service if not already installed */
     esp_err_t isr_ret = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+    if (isr_ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGD(RAIN_TAG, "GPIO ISR service already installed (shared with button driver)");
+    } else if (isr_ret != ESP_OK) {
         ESP_LOGE(RAIN_TAG, "Failed to install ISR service: %s", esp_err_to_name(isr_ret));
         return;
+    } else {
+        ESP_LOGD(RAIN_TAG, "GPIO ISR service installed successfully");
     }
     
     /* Don't add ISR handler yet - will be added when network connects */

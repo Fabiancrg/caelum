@@ -230,9 +230,13 @@ bool builtin_button_driver_init(builtin_button_callback_t callback)
 
     /* Install GPIO ISR service if not already installed */
     esp_err_t isr_ret = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+    if (isr_ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGD(BUILTIN_BUTTON_TAG, "GPIO ISR service already installed");
+    } else if (isr_ret != ESP_OK) {
         ESP_LOGE(BUILTIN_BUTTON_TAG, "Failed to install ISR service: %s", esp_err_to_name(isr_ret));
         return false;
+    } else {
+        ESP_LOGD(BUILTIN_BUTTON_TAG, "GPIO ISR service installed successfully");
     }
     
     /* Add ISR handler for builtin button */
@@ -433,11 +437,15 @@ bool external_button_driver_init(external_button_callback_t callback)
         return false;
     }
 
-    /* Install GPIO ISR service if not already installed (ignore if already installed) */
+    /* Install GPIO ISR service if not already installed */
     esp_err_t isr_ret = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+    if (isr_ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGD(EXTERNAL_BUTTON_TAG, "GPIO ISR service already installed");
+    } else if (isr_ret != ESP_OK) {
         ESP_LOGE(EXTERNAL_BUTTON_TAG, "Failed to install ISR service: %s", esp_err_to_name(isr_ret));
         return false;
+    } else {
+        ESP_LOGD(EXTERNAL_BUTTON_TAG, "GPIO ISR service installed successfully");
     }
     
     /* Add ISR handler for external button */
