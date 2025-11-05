@@ -3,7 +3,7 @@
 | Supported Targets | ESP32-C6 | ESP32-H2 |
 | ----------------- |  -------- | -------- |
 
-# ACW02-ZB Zigbee Weather Station
+# Zigbee Weather Station
 
 [![License: GPL v3](https://img.shields.io/badge/Software-GPLv3-blue.svg)](./LICENSE)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/Hardware-CC%20BY--NC--SA%204.0-green.svg)](./LICENSE-hardware)
