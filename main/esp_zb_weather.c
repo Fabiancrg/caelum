@@ -28,6 +28,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
+#include "esp_timer.h"
 /* Generated header with FW_VERSION / FW_DATE_CODE - created at configure time */
 #include "version.h"
 
@@ -97,6 +98,7 @@ static void rain_gauge_disable_isr(void);
 static bool rain_gauge_should_report(void);
 static esp_err_t battery_adc_init(void);
 static void battery_read_and_report(uint8_t param);
+static void sleep_duration_report(uint8_t param);
 static void rain_gauge_hourly_check(uint8_t param);
 static esp_err_t deferred_driver_init(void)
 {
@@ -192,6 +194,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 2000); // Report in 2 seconds
                 esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 3000); // Report rainfall in 3 seconds
                 esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 4000); // Report battery in 4 seconds
+                esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 5000); // Report sleep duration in 5 seconds
                 
                 /* Check if OTA is in progress before scheduling deep sleep */
                 if (esp_zb_ota_is_active()) {
@@ -234,6 +237,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             /* Enable rain gauge now that we're connected */
             rain_gauge_enable_isr();
             ESP_LOGI(RAIN_TAG, "Rain gauge enabled - device connected to Zigbee network");
+            
+            /* Schedule sensor data reporting after first connection */
+            ESP_LOGI(TAG, "📊 Scheduling initial sensor data reporting after network join");
+            esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 2000); // Report in 2 seconds
+            esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 3000); // Report rainfall in 3 seconds
+            esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 4000); // Report battery in 4 seconds
+            esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 5000); // Report sleep duration in 5 seconds
             
             /* Check if OTA is in progress before scheduling deep sleep */
             if (esp_zb_ota_is_active()) {
@@ -1167,25 +1177,28 @@ static void battery_read_and_report(uint8_t param)
      * Uses NVS to persist timestamp across deep sleep. */
     
     const uint32_t BATTERY_READ_INTERVAL_SEC = 3600;  // 1 hour
-    static bool interval_checked = false;
     
-    if (!interval_checked) {
-        interval_checked = true;
-        
-        // Get current time since boot (in seconds)
-        uint32_t current_time_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
-        
-        // Read last battery reading timestamp from NVS
-        nvs_handle_t nvs_handle;
-        esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
-        uint32_t last_battery_read_time = 0;
-        
-        if (err == ESP_OK) {
-            nvs_get_u32(nvs_handle, "batt_time", &last_battery_read_time);
-            nvs_close(nvs_handle);
+    // Get current time since boot (in seconds)
+    uint32_t current_time_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+    
+    // Read last battery reading timestamp from NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
+    uint32_t last_battery_read_time = 0;
+    bool first_reading = false;
+    
+    if (err == ESP_OK) {
+        err = nvs_get_u32(nvs_handle, "batt_time", &last_battery_read_time);
+        if (err != ESP_OK) {
+            first_reading = true;  // Key doesn't exist - this is the first reading
         }
-        
-        // Check if enough time has elapsed
+        nvs_close(nvs_handle);
+    } else {
+        first_reading = true;  // NVS not available - assume first reading
+    }
+    
+    // Check if enough time has elapsed (skip interval check on first reading)
+    if (!first_reading) {
         uint32_t elapsed_sec = current_time_sec - last_battery_read_time;
         
         if (elapsed_sec < BATTERY_READ_INTERVAL_SEC) {
@@ -1194,15 +1207,17 @@ static void battery_read_and_report(uint8_t param)
             return;  // Skip this reading
         }
         
-        // Time to read battery - update timestamp in NVS
-        err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
-        if (err == ESP_OK) {
-            nvs_set_u32(nvs_handle, "batt_time", current_time_sec);
-            nvs_commit(nvs_handle);
-            nvs_close(nvs_handle);
-        }
-        
         ESP_LOGI(BATTERY_TAG, "🔋 Reading battery (last read %lu sec ago)", elapsed_sec);
+    } else {
+        ESP_LOGI(BATTERY_TAG, "🔋 Reading battery (first reading after boot/pairing)");
+    }
+    
+    // Time to read battery - update timestamp in NVS
+    err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+    if (err == ESP_OK) {
+        nvs_set_u32(nvs_handle, "batt_time", current_time_sec);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
     }
     
     float battery_voltage = 0.0f;
@@ -1304,6 +1319,28 @@ skip_adc:
              battery_voltage, percentage, zigbee_voltage, zigbee_percentage);
 }
 
+/* Sleep duration reporting function */
+static void sleep_duration_report(uint8_t param)
+{
+    float sleep_duration_float = (float)sleep_duration_seconds;
+    
+    esp_err_t ret = esp_zb_zcl_set_attribute_val(
+        HA_ESP_SLEEP_CONFIG_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+        &sleep_duration_float,
+        true  // Force reporting to ensure Z2M gets the update
+    );
+    
+    if (ret == ESP_OK) {
+        ESP_LOGI(SLEEP_CONFIG_TAG, "✅ Sleep duration %.0f seconds (%.1f min) reported to Zigbee", 
+                 sleep_duration_float, sleep_duration_float / 60.0f);
+    } else {
+        ESP_LOGE(SLEEP_CONFIG_TAG, "❌ Failed to report sleep duration: %s", esp_err_to_name(ret));
+    }
+}
+
 /* Sleep configuration functions */
 static esp_err_t sleep_config_load(void)
 {
@@ -1379,6 +1416,23 @@ static void rain_gauge_init(void)
         ESP_LOGI(RAIN_TAG, "Loaded previous rainfall total: %.2f mm (%lu pulses)", total_rainfall_mm, rain_pulse_count);
     } else {
         ESP_LOGI(RAIN_TAG, "No previous rainfall data found, starting from 0.0mm");
+    }
+    
+    /* Handle rain wake-up: count the pulse that caused the wake-up from deep sleep */
+    wake_reason_t wake_reason = check_wake_reason();
+    if (wake_reason == WAKE_REASON_RAIN) {
+        rain_pulse_count++;
+        total_rainfall_mm += RAIN_MM_PER_PULSE;
+        total_rainfall_mm = roundf(total_rainfall_mm * 100.0f) / 100.0f; // Round to 2 decimals
+        
+        ESP_LOGI(RAIN_TAG, "🌧️ Rain pulse detected during sleep! Pulse #%u, Total: %.2f mm (+%.2f mm)", 
+                 rain_pulse_count, total_rainfall_mm, RAIN_MM_PER_PULSE);
+        
+        // Save to NVS immediately when waking from rain
+        save_rainfall_data(total_rainfall_mm, rain_pulse_count);
+        
+        // Mark that we should report this on next Zigbee connection
+        last_reported_rainfall_mm = total_rainfall_mm - 1.0f; // Force threshold reporting
     }
     
     /* Configure GPIO for rain gauge */
