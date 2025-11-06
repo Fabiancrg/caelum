@@ -1440,6 +1440,8 @@ static esp_err_t battery_adc_init(void)
 
 static void battery_read_and_report(uint8_t param)
 {
+    ESP_LOGI(BATTERY_TAG, "🔧 battery_read_and_report() called");
+    
     /* Power optimization: Read battery only once per hour (time-based) to save ~360µAh/day
      * This ensures we read once per hour regardless of wake reason (rain vs timer).
      * Uses NVS to persist timestamp across deep sleep. */
@@ -1449,35 +1451,63 @@ static void battery_read_and_report(uint8_t param)
     // Get current time since boot (in seconds)
     uint32_t current_time_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
     
+    ESP_LOGI(BATTERY_TAG, "🕐 Current time since boot: %lu seconds", current_time_sec);
+    
     // Read last battery reading timestamp from NVS
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
     uint32_t last_battery_read_time = 0;
     bool first_reading = false;
+    bool force_read = false;
     
     if (err == ESP_OK) {
         err = nvs_get_u32(nvs_handle, "batt_time", &last_battery_read_time);
         if (err != ESP_OK) {
             first_reading = true;  // Key doesn't exist - this is the first reading
+            ESP_LOGI(BATTERY_TAG, "📝 No previous battery timestamp in NVS - first reading");
+        } else {
+            ESP_LOGI(BATTERY_TAG, "📝 Last battery timestamp from NVS: %lu seconds", last_battery_read_time);
+            
+            // Check for reboot: if saved timestamp is close to current boot time (within 30 seconds),
+            // it means we rebooted and should force a reading
+            if (last_battery_read_time < 30 && current_time_sec < 30) {
+                ESP_LOGI(BATTERY_TAG, "🔄 Recent boot detected (both times < 30s) - forcing battery read");
+                force_read = true;
+            }
         }
         nvs_close(nvs_handle);
     } else {
         first_reading = true;  // NVS not available - assume first reading
+        ESP_LOGW(BATTERY_TAG, "⚠️  NVS not available - assuming first reading");
     }
     
-    // Check if enough time has elapsed (skip interval check on first reading)
-    if (!first_reading) {
-        uint32_t elapsed_sec = current_time_sec - last_battery_read_time;
-        
-        if (elapsed_sec < BATTERY_READ_INTERVAL_SEC) {
-            ESP_LOGD(BATTERY_TAG, "⏭️  Skipping battery read (%lu sec since last, need %lu)", 
+    // Check if enough time has elapsed (skip interval check on first reading or forced read)
+    if (!first_reading && !force_read) {
+        // Handle potential timer overflow on reboot: if last_battery_read_time is much larger
+        // than current_time_sec, it means we rebooted and should read battery
+        if (last_battery_read_time > current_time_sec) {
+            ESP_LOGI(BATTERY_TAG, "🔄 Device rebooted (timer reset detected) - forcing battery read");
+            force_read = true;
+        } else {
+            uint32_t elapsed_sec = current_time_sec - last_battery_read_time;
+            
+            ESP_LOGI(BATTERY_TAG, "⏱️  Elapsed time: %lu seconds (need %lu for next reading)", 
                      elapsed_sec, BATTERY_READ_INTERVAL_SEC);
-            return;  // Skip this reading
+            
+            if (elapsed_sec < BATTERY_READ_INTERVAL_SEC) {
+                ESP_LOGI(BATTERY_TAG, "⏭️  Skipping battery read (%lu sec since last, need %lu)", 
+                         elapsed_sec, BATTERY_READ_INTERVAL_SEC);
+                return;  // Skip this reading
+            }
+            
+            ESP_LOGI(BATTERY_TAG, "🔋 Reading battery (last read %lu sec ago)", elapsed_sec);
         }
-        
-        ESP_LOGI(BATTERY_TAG, "🔋 Reading battery (last read %lu sec ago)", elapsed_sec);
-    } else {
+    }
+    
+    if (first_reading) {
         ESP_LOGI(BATTERY_TAG, "🔋 Reading battery (first reading after boot/pairing)");
+    } else if (force_read) {
+        ESP_LOGI(BATTERY_TAG, "🔋 Reading battery (forced after reboot)");
     }
     
     // Time to read battery - update timestamp in NVS
@@ -1494,8 +1524,8 @@ static void battery_read_and_report(uint8_t param)
         ESP_LOGE(BATTERY_TAG, "ADC not initialized, using simulated value");
         battery_voltage = 3.7f;  // Fallback simulated value
     } else {
-        /* Power optimization: Reduced from 10 to 3 samples (saves ~70% ADC power) */
-        const int num_samples = 3;
+    /* Power optimization: Reduced from 10 to 3 samples (better accuracy, still low power) */
+    const int num_samples = 3;
         int voltage_sum = 0;
         int raw_sum = 0;
         
@@ -1777,6 +1807,17 @@ void app_main(void)
     
     /* Initialize debug LED */
     debug_led_init();
+    
+    /* Set initial LED state - will show status immediately on battery power */
+    if (led_debug_enabled) {
+        if (zigbee_network_connected) {
+            debug_led_set(true);  // Blue - already connected
+            ESP_LOGI(TAG, "💡 LED initialized: BLUE (network connected)");
+        } else {
+            debug_led_start_blink();  // Orange blink - will join network
+            ESP_LOGI(TAG, "💡 LED initialized: ORANGE BLINK (joining network)");
+        }
+    }
     
     /* Initialize OTA */
     ESP_ERROR_CHECK(esp_zb_ota_init());
