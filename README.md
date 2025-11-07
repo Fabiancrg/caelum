@@ -26,7 +26,7 @@ This project is based on the examples provided in the ESP Zigbee SDK:
 | **1** | Environmental Sensor | Temperature, Humidity, Pressure, Battery, OTA | BME280 sensor via I2C |
 | **2** | Rain Gauge | Analog Input | Tipping bucket rain sensor with rainfall totals |
 | **3** | Sleep Configuration | Analog Input | Remote sleep duration control (60-7200 seconds) |
-| **4** | LED Debug Control | On/Off | WS2812 RGB LED status indicator (remote control) |
+| **4 (removed)** | LED Debug Control | On/Off | Moved to primary endpoint (EP1); no separate EP4 registered — LED control provided via genOnOff on EP1 |
 
 ### 💡 LED Debug Feature (Optional)
 
@@ -379,7 +379,73 @@ WeatherStation/
 └── README.md               # This file
 ```
 
-## 🔧 Troubleshooting
+## �️ Recent changes (summary)
+
+The following changes were applied to the firmware and Zigbee2MQTT converter in recent updates. This section documents the edits made so you can rebuild, flash and test the updated behaviour.
+
+- Converter (`caelum-weather-station.js`):
+  - Mapped the device to advertise endpoints 1..3 (removed explicit EP4 advertisement).
+  - Switched configureReporting for analog inputs to numeric reporting values (example: {min:10, max:3600, change:0.1}) so controllers only subscribe to the `presentValue` attribute and not `statusFlags`.
+  - Moved the On/Off expose to the primary endpoint mapping so controllers will use EP1 for LED control.
+
+- Firmware (`main/esp_zb_weather.c`, `main/esp_zb_weather.h` and related):
+  - Endpoint & cluster changes:
+    - Removed Basic cluster exposure from non-primary endpoints to prevent coordinators reading Basic attributes on the sensor endpoints.
+    - Moved `genOnOff` (LED debug) to the primary endpoint (EP1); no separate EP4 is registered anymore.
+    - Ensured Analog Input clusters expose only `presentValue` for rain / sleep configuration to avoid sending `statusFlags` to the controller.
+    - Fixed ZCL string length prefixing for `sleep_description` and other length-prefixed ZCL string attributes.
+
+  - Rain gauge reliability and counting fixes:
+    - ISR now timestamps events and queues a small event struct so the rain task can disambiguate wake-count vs queued ISR events.
+    - Introduced a small duplicate-suppression window after wake (50 ms) to avoid double-counting the same physical tip when the wake path and ISR both fire for the same edge.
+    - Kept the ISR handler installed across sleep/wake; bounce handling now disables/re-enables the GPIO interrupt line (gpio_intr_disable/enable) instead of removing and re-adding the ISR handler. This reduces the race window where pulses could be missed.
+    - Reduced the bounce settle time and debounce defaults to improve responsiveness while still preventing false tips (defaults in code: 200 ms debounce / 200 ms settle).
+    - Queue events carry ISR ticks for robust timing comparisons in the consumer task.
+
+  - Wake/reporting timing and sleep behaviour:
+    - The device now schedules a shorter reporting window after wake so overall awake time is reduced.
+      - Reporting window (time between wake and starting deep-sleep preparation) is now 7 seconds (was previously 15s / 10s in some paths).
+      - Per-sensor scheduled report offsets inside that window: BME280 at ~1s, rain update at ~2s, battery at ~3s, sleep-duration at ~4s.
+    - Final delays in `prepare_for_deep_sleep()` were reduced (smaller vTaskDelay values) while preserving a short transmission window to allow Zigbee packets to be sent.
+    - OTA behaviour is unchanged: if an OTA update is active the device will postpone deep sleep and periodically re-check the OTA status until the transfer is complete.
+
+  - Miscellaneous:
+    - `RAIN_MM_PER_PULSE` remains 0.36 mm per tip; all rain math still uses this constant.
+    - NVS persistence for rain totals and sleep configuration remains in place and is used to recover counts across reboots.
+
+## 🔁 How to build & flash the updated firmware (Windows PowerShell)
+
+Use your existing ESP-IDF environment and the usual build/flash commands. Example (PowerShell):
+
+```powershell
+# Set target and open menuconfig if needed
+idf.py set-target esp32h2
+idf.py menuconfig
+
+# Optional: erase flash for a clean install
+idf.py -p COM3 erase-flash
+
+# Build and flash
+idf.py -p COM3 flash monitor
+```
+
+Replace `COM3` with your serial port. `monitor` attaches the serial monitor after flash; you'll see the device logs in the console.
+
+## ✅ Test checklist after flashing
+
+1. Pair the device with your Zigbee coordinator (or let Zigbee2MQTT re-discover the device).
+2. Verify endpoints: device should advertise endpoints 1..3 and the LED On/Off should be on EP1.
+3. Check Zigbee2MQTT logs: ensure that only `presentValue` for genAnalogInput is reported for rain and sleep duration, and that `statusFlags` is not being reported.
+4. Trigger a rain pulse (or simulate the reed switch): verify that pulses are counted even if they occur before Zigbee reconnect; verify duplicate suppression does not double-count the same physical tip.
+5. Observe a normal wake cycle: sensor reports should appear at ~1s/2s/3s/4s and the device should enter deep sleep after ~7s (log messages show the exact timing).
+6. Start an OTA update (if available) and verify the device stays awake for the duration of the transfer.
+
+If any reports are missed in practice, increase the reporting window to 10s or increase the final transmission delay in `prepare_for_deep_sleep()`.
+
+If you'd like, I can prepare a complementary small test patch that logs timestamps when each scheduled report runs so you can measure precise timings on your hardware.
+
+
+## �🔧 Troubleshooting
 
 ### Common Issues
 

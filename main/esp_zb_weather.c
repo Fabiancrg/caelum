@@ -410,10 +410,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 
                 /* Schedule sensor data reporting and sleep after wake-up from deep sleep */
                 ESP_LOGI(TAG, "📊 Scheduling sensor data reporting after wake-up");
-                esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 2000); // Report in 2 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 3000); // Report rainfall in 3 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 4000); // Report battery in 4 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 5000); // Report sleep duration in 5 seconds
+                esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 1000); // Report in 1 second
+                esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 2000); // Report rainfall in 2 seconds
+                esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
+                esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
                 
                 /* Check if OTA is in progress before scheduling deep sleep */
                 if (esp_zb_ota_is_active()) {
@@ -424,8 +424,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 } else {
                     /* Schedule deep sleep after reporting window */
                     if (!deep_sleep_scheduled) {
-                        ESP_LOGI(TAG, "⏰ Scheduling deep sleep after reporting window (15 seconds)");
-                        esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 15000);
+                        ESP_LOGI(TAG, "⏰ Scheduling deep sleep after reporting window (5 seconds)");
+                        esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 7000);
                         deep_sleep_scheduled = true;
                     }
                 }
@@ -462,10 +462,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             
             /* Schedule sensor data reporting after first connection */
             ESP_LOGI(TAG, "📊 Scheduling initial sensor data reporting after network join");
-            esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 2000); // Report in 2 seconds
-            esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 3000); // Report rainfall in 3 seconds
-            esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 4000); // Report battery in 4 seconds
-            esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 5000); // Report sleep duration in 5 seconds
+            esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 1000); // Report in 1 second
+            esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 2000); // Report rainfall in 2 seconds
+            esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
+            esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
             
             /* Check if OTA is in progress before scheduling deep sleep */
             if (esp_zb_ota_is_active()) {
@@ -476,8 +476,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             } else {
                 /* Now that we're connected, schedule normal deep sleep after allowing time for data reporting */
                 if (!deep_sleep_scheduled) {
-                    ESP_LOGI(TAG, "📡 Network connected! Scheduling sleep after sensor data reporting (15 seconds)");
-                    esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 15000); // 15 seconds for reporting
+                    ESP_LOGI(TAG, "📡 Network connected! Scheduling sleep after sensor data reporting (5 seconds)");
+                    esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 7000); // 7 seconds for reporting
                     deep_sleep_scheduled = true;
                 }
             }
@@ -664,12 +664,12 @@ static void prepare_for_deep_sleep(uint8_t param)
     /* Force final sensor reporting before sleep */
     if (zigbee_network_connected) {
         ESP_LOGI(TAG, "📊 Sending final sensor reports before deep sleep...");
-        bme280_read_and_report(0);
-        vTaskDelay(pdMS_TO_TICKS(100)); // Brief delay between reports
-        rain_gauge_zigbee_update(0);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        battery_read_and_report(0);
-        vTaskDelay(pdMS_TO_TICKS(500)); // Allow time for Zigbee transmission
+    bme280_read_and_report(0);
+    vTaskDelay(pdMS_TO_TICKS(50)); // Brief delay between reports
+    rain_gauge_zigbee_update(0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    battery_read_and_report(0);
+    vTaskDelay(pdMS_TO_TICKS(200)); // Allow time for Zigbee transmission
     }
     
     /* Reset deep sleep scheduling flag */
@@ -704,15 +704,15 @@ static void prepare_for_deep_sleep(uint8_t param)
     ESP_LOGI(TAG, "💤 Entering deep sleep for %lu seconds...", sleep_duration);
     
     /* Give time for log output */
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     /* Update rain gauge value before sleep */
     rain_gauge_zigbee_update(0); // Send last rain value
-    vTaskDelay(pdMS_TO_TICKS(100)); // Allow time for Zigbee transmission
+    vTaskDelay(pdMS_TO_TICKS(50)); // Allow time for Zigbee transmission
     /* Suspend Zigbee stack before deep sleep (required for ESP32-H2) */
     ESP_LOGI(TAG, "📴 Suspending Zigbee stack before deep sleep...");
     esp_zb_sleep_enable(true);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50));
     
     /* Enter deep sleep with timer and GPIO wake-up enabled */
     enter_deep_sleep(sleep_duration, true);  // Enable rain detection wake-up
@@ -733,7 +733,7 @@ static void check_ota_status(uint8_t param)
         /* OTA completed or not active - schedule deep sleep */
         ESP_LOGI(TAG, "✅ OTA check complete, scheduling deep sleep");
         if (!deep_sleep_scheduled && zigbee_network_connected) {
-            esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 5000);
+            esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 7000);
             deep_sleep_scheduled = true;
         }
     }
@@ -1009,7 +1009,7 @@ static void esp_zb_task(void *pvParameters)
     /* Schedule deep sleep entry - but only after network connection or extended timeout */
     if (zigbee_network_connected) {
         /* Already connected, can sleep normally after initial operations */
-        esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 10000); // 10 seconds
+    esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_deep_sleep, 0, 7000); // 7 seconds
     } else {
         /* Not connected yet, wait longer for join process and retry connection attempts */
         ESP_LOGI(TAG, "📡 Network not connected, extending wake time for join process (60 seconds)");
@@ -1020,7 +1020,7 @@ static void esp_zb_task(void *pvParameters)
     /* Note: Button monitoring is now interrupt-based, no polling task needed */
     
     /* Start main Zigbee stack loop - will run until deep sleep scheduled task executes */
-    ESP_LOGI(TAG, "⏳ Starting Zigbee stack, will enter deep sleep in 10 seconds...");
+    ESP_LOGI(TAG, "⏳ Starting Zigbee stack, will enter deep sleep in 7 seconds...");
     esp_zb_stack_main_loop();
 }
 
