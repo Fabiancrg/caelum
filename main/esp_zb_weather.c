@@ -894,13 +894,10 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_bme280_clusters, endpoint_bme280_config);    /* Create rain gauge sensor endpoint */
     esp_zb_cluster_list_t *esp_zb_rain_clusters = esp_zb_zcl_cluster_list_create();
     
-    /* Create Basic cluster for rain gauge endpoint */
-    esp_zb_basic_cluster_cfg_t basic_rain_cfg = {
-        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
-        .power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_DEFAULT_VALUE,
-    };
-    esp_zb_attribute_list_t *esp_zb_basic_rain_cluster = esp_zb_basic_cluster_create(&basic_rain_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(esp_zb_rain_clusters, esp_zb_basic_rain_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    /* Basic cluster intentionally omitted for rain gauge endpoint (EP2).
+     * We expose only the Analog Input cluster on this endpoint so the coordinator
+     * does not attempt to read device-level Basic attributes here.
+     */
     
     /* Create Analog Input cluster for rain gauge (reports rainfall in mm) */
     esp_zb_analog_input_cluster_cfg_t rain_analog_cfg = {
@@ -932,13 +929,9 @@ static void esp_zb_task(void *pvParameters)
     /* CREATE SLEEP CONFIGURATION ENDPOINT */
     esp_zb_cluster_list_t *esp_zb_sleep_clusters = esp_zb_zcl_cluster_list_create();
     
-    /* Create Basic cluster for sleep config endpoint */
-    esp_zb_basic_cluster_cfg_t basic_sleep_cfg = {
-        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
-        .power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_DEFAULT_VALUE,
-    };
-    esp_zb_attribute_list_t *esp_zb_basic_sleep_cluster = esp_zb_basic_cluster_create(&basic_sleep_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(esp_zb_sleep_clusters, esp_zb_basic_sleep_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    /* Basic cluster intentionally omitted for sleep config endpoint (EP3).
+     * This endpoint exposes only the sleep configuration Analog Input cluster.
+     */
     
     /* Create Analog Input cluster for sleep duration configuration (writable) */
     float sleep_duration_float = (float)sleep_duration_seconds;  // Convert to float for analog input
@@ -971,13 +964,9 @@ static void esp_zb_task(void *pvParameters)
     /* CREATE LED DEBUG CONTROL ENDPOINT */
     esp_zb_cluster_list_t *esp_zb_led_clusters = esp_zb_zcl_cluster_list_create();
     
-    /* Create Basic cluster for LED debug endpoint */
-    esp_zb_basic_cluster_cfg_t basic_led_cfg = {
-        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
-        .power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_DEFAULT_VALUE,
-    };
-    esp_zb_attribute_list_t *esp_zb_basic_led_cluster = esp_zb_basic_cluster_create(&basic_led_cfg);
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(esp_zb_led_clusters, esp_zb_basic_led_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    /* Basic cluster intentionally omitted for LED debug endpoint (EP4).
+     * LED debug endpoint provides only On/Off control and Identify cluster.
+     */
     
     /* Create On/Off cluster for LED debug control */
     esp_zb_on_off_cluster_cfg_t onoff_cfg = {
@@ -1002,10 +991,10 @@ static void esp_zb_task(void *pvParameters)
         .manufacturer_name = ESP_MANUFACTURER_NAME,
         .model_identifier = ESP_MODEL_IDENTIFIER,
     };
+    /* Add manufacturer info only to primary endpoint (BME280). Basic cluster is
+     * intentionally not present on other endpoints to reduce coordinator reads.
+     */
     esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_BME280_ENDPOINT, &info);
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_RAIN_GAUGE_ENDPOINT, &info);
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_SLEEP_CONFIG_ENDPOINT, &info);
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_ep_list, HA_ESP_LED_DEBUG_ENDPOINT, &info);
 
     esp_zb_device_register(esp_zb_ep_list);
     esp_zb_core_action_handler_register(zb_action_handler);
