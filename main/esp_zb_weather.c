@@ -698,7 +698,6 @@ static void prepare_for_deep_sleep(uint8_t param)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     /* Update rain gauge value before sleep */
-    ESP_LOGI(TAG, " 🌧️ Sending rainfall total value...");
     rain_gauge_zigbee_update(0); // Send last rain value
     vTaskDelay(pdMS_TO_TICKS(100)); // Allow time for Zigbee transmission
     /* Suspend Zigbee stack before deep sleep (required for ESP32-H2) */
