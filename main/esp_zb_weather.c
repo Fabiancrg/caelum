@@ -408,12 +408,12 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 rain_gauge_enable_isr();
                 ESP_LOGI(TAG, "📡 Re-enabled rain gauge after reboot (previously connected network)");
                 
-                /* Schedule sensor data reporting and sleep after wake-up from deep sleep */
-                ESP_LOGI(TAG, "📊 Scheduling sensor data reporting after wake-up");
-                esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 1000); // Report in 1 second
-                esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 2000); // Report rainfall in 2 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
+                // /* Schedule sensor data reporting and sleep after wake-up from deep sleep */
+                // ESP_LOGI(TAG, "📊 Scheduling sensor data reporting after wake-up");
+                // esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 1000); // Report in 1 second
+                // esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 2000); // Report rainfall in 2 seconds
+                // esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
+                // esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
                 
                 /* Check if OTA is in progress before scheduling deep sleep */
                 if (esp_zb_ota_is_active()) {
@@ -1154,8 +1154,7 @@ static void rain_gauge_task(void *arg)
     TickType_t last_debug_time = 0;
     const TickType_t DEBOUNCE_TIME = pdMS_TO_TICKS(200); // 200ms debounce - more than adequate for rain gauge
     const TickType_t BOUNCE_SETTLE_TIME = pdMS_TO_TICKS(200); // 200ms settle to reduce gap while still debouncing
-    const TickType_t DEBUG_INTERVAL = pdMS_TO_TICKS(5000); // Log GPIO state every 5 seconds
-
+    
     ESP_LOGI(RAIN_TAG, "Rain gauge task started, waiting for events...");
 
     for (;;) {
@@ -1255,15 +1254,6 @@ static void rain_gauge_task(void *arg)
             } else {
                 ESP_LOGW(RAIN_TAG, "⏱️ Rain pulse IGNORED - debounce protection active (%ums < %ums threshold)",
                          time_diff_ms, pdTICKS_TO_MS(DEBOUNCE_TIME));
-            }
-        } else {
-            // Timeout - periodic debug logging when enabled and connected
-            TickType_t current_time = xTaskGetTickCount();
-            if (rain_gauge_enabled && (current_time - last_debug_time) > DEBUG_INTERVAL) {
-                int current_level = gpio_get_level(RAIN_GAUGE_GPIO);
-                ESP_LOGI(RAIN_TAG, "🔧 Periodic check - GPIO%d level: %d, enabled: YES, total: %.2fmm",
-                         RAIN_GAUGE_GPIO, current_level, total_rainfall_mm);
-                last_debug_time = current_time;
             }
         }
     }
