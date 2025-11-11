@@ -85,8 +85,25 @@ static void debug_led_init(void)
     ESP_LOGI(TAG, "Debug RGB LED initialized on GPIO%d (WS2812)", DEBUG_LED_GPIO);
 }
 
+static void debug_led_deinit(void)
+{
+    /* Deinitialize LED strip to power down RMT peripheral before sleep
+     * RMT peripheral consumes ~1-2mA when active, even with LED "off" */
+    if (led_strip) {
+        led_strip_clear(led_strip);  // Clear pixels first
+        led_strip_del(led_strip);    // Delete LED strip handle (powers down RMT)
+        led_strip = NULL;
+        ESP_LOGI(TAG, "🔌 RGB LED RMT peripheral powered down for sleep");
+    }
+}
+
 static void debug_led_set(bool state)
 {
+    /* Reinitialize LED if it was deinitialized for sleep */
+    if (led_strip == NULL) {
+        debug_led_init();
+    }
+    
     if (!led_debug_enabled) {
         led_strip_clear(led_strip);
         return;
@@ -103,6 +120,11 @@ static void debug_led_set(bool state)
 
 static void debug_led_set_orange(void)
 {
+    /* Reinitialize LED if it was deinitialized for sleep */
+    if (led_strip == NULL) {
+        debug_led_init();
+    }
+    
     if (!led_debug_enabled) {
         led_strip_clear(led_strip);
         return;
@@ -129,6 +151,11 @@ static void debug_led_blink_task(void *arg)
 
 static void debug_led_start_blink(void)
 {
+    /* Reinitialize LED if it was deinitialized for sleep */
+    if (led_strip == NULL) {
+        debug_led_init();
+    }
+    
     if (!led_debug_enabled) return;
     
     if (!led_blink_task_running) {
@@ -151,6 +178,11 @@ static void debug_led_stop_blink(void)
 
 static void debug_led_rain_flash(void)
 {
+    /* Reinitialize LED if it was deinitialized for sleep */
+    if (led_strip == NULL) {
+        debug_led_init();
+    }
+    
     if (!led_debug_enabled) return;
     
     /* Quick white flash for rain pulse (non-blocking) */
@@ -287,7 +319,6 @@ static const char *SLEEP_CONFIG_TAG = "SLEEP_CONFIG";
 
 /* Network connection status (zigbee_network_connected declared earlier for LED functions) */
 static uint32_t connection_retry_count = 0;
-static bool sleep_scheduled = false;  // Track if sleep has been scheduled
 #define NETWORK_RETRY_SLEEP_DURATION    30      // 30 seconds for network retry
 #define MAX_CONNECTION_RETRIES          20      // Max retries before giving up (10 minutes total)
 
@@ -297,8 +328,6 @@ static bool sleep_scheduled = false;  // Track if sleep has been scheduled
 static void builtin_button_callback(button_action_t action);
 static void factory_reset_device(uint8_t param);
 static void bme280_read_and_report(uint8_t param);
-static void prepare_for_light_sleep(uint8_t param);
-static void sed_wake_and_report(uint8_t param);
 static esp_err_t sleep_config_load(void);
 static esp_err_t sleep_config_save(void);
 static esp_err_t led_config_load(void);
@@ -437,25 +466,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 debug_led_start_blink();  // Start blinking when joining network
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             } else {
-                ESP_LOGI(TAG, "Device rebooted - was previously connected");
-                debug_led_stop_blink();  // Stop blinking
-                debug_led_set(true);     // LED ON - connected
-                /* Device was previously paired - mark as connected and enable rain gauge */
-                zigbee_network_connected = true;
-                rain_gauge_enable_isr();
-                ESP_LOGI(TAG, "📡 Re-enabled rain gauge after reboot (previously connected network)");
+                ESP_LOGI(TAG, "Device rebooted - rejoining previous network");
+                debug_led_start_blink();  // Start blinking when rejoining
                 
-                /* Schedule sensor data reporting and sleep after wake-up from deep sleep */
-                ESP_LOGI(TAG, "📊 Scheduling sensor data reporting after wake-up");
-                esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 1000); // Report in 1 second
-                esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 2000); // Report rainfall in 2 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
-                esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
-                
-                /* In SED mode with automatic sleep, just schedule next periodic report */
-                ESP_LOGI(TAG, "� SED automatic sleep enabled - device will sleep when idle");
-                ESP_LOGI(TAG, "⏰ Next sensor report in %d seconds", sleep_duration_seconds);
-                esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, sleep_duration_seconds * 1000);
+                /* CRITICAL: Device must rejoin network after reboot!
+                 * Don't mark as connected or schedule reports yet - wait for ESP_ZB_BDB_SIGNAL_STEERING success.
+                 * The ESP_ZB_BDB_SIGNAL_STEERING handler will enable rain gauge and schedule initial reports. */
+                esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             }
         } else {
             /* commissioning failed - try to rejoin */
@@ -494,12 +511,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
             esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
             
-            /* In SED mode with automatic sleep, we don't manually schedule sleep.
-             * The Zigbee stack will automatically enter light sleep when idle.
-             * Just schedule the next periodic sensor report. */
-            ESP_LOGI(TAG, "💤 SED automatic sleep enabled - device will sleep when idle");
-            ESP_LOGI(TAG, "⏰ Next sensor report in %d seconds", sleep_duration_seconds);
-            esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, sleep_duration_seconds * 1000);
+            /* Device will enter light sleep automatically when all initial reports complete */
+            ESP_LOGI(TAG, "💤 Initial reports scheduled - device will sleep when idle");
         } else {
             ESP_LOGI(TAG, "Network steering was not successful (status: %s)", esp_err_to_name(err_status));
             
@@ -516,7 +529,23 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         }
         break;
     case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP:
+        /* Check if OTA upgrade is in progress - MUST NOT sleep during OTA! */
+        if (esp_zb_ota_is_active()) {
+            ESP_LOGW(TAG, "⚠️ OTA upgrade in progress - preventing sleep");
+            /* Don't call esp_zb_sleep_now() - let OTA complete */
+            break;
+        }
+        
         ESP_LOGI(TAG, "Zigbee can sleep");
+        #ifdef DEBUG_LED_ENABLE
+        /* CRITICAL: Power down LED hardware and RMT peripheral before sleep
+         * The RMT peripheral consumes ~1-2mA when active, even with LED "off" */
+        #if DEBUG_LED_TYPE_RGB
+        debug_led_deinit();  // Deinitialize LED strip and power down RMT peripheral
+        #else
+        gpio_set_level(DEBUG_LED_GPIO, 0);  // Turn off GPIO LED
+        #endif
+        #endif
         esp_zb_sleep_now();
         break;
     default:
@@ -671,115 +700,14 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 /**
  * @brief Prepare for light sleep - called by Zigbee scheduler after operations complete
  */
-static void prepare_for_light_sleep(uint8_t param)
-{
-    /* Check if OTA upgrade is in progress */
-    if (esp_zb_ota_is_active()) {
-        ESP_LOGW(TAG, "⚠️ OTA upgrade in progress, postponing light sleep...");
-        /* Reschedule sleep check in 60 seconds */
-        esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_light_sleep, 0, 60000);
-        return;
-    }
-    
-    ESP_LOGI(TAG, "✅ Zigbee operations complete, preparing for light sleep...");
-    
-    /* Turn off LED before sleep */
-    debug_led_stop_blink();
-    debug_led_set(false);
-    
-    /* Force final sensor reporting before sleep */
-    if (zigbee_network_connected) {
-        ESP_LOGI(TAG, "📊 Sending final sensor reports before light sleep...");
-        bme280_read_and_report(0);
-        vTaskDelay(pdMS_TO_TICKS(50)); // Brief delay between reports
-        rain_gauge_zigbee_update(0);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        battery_read_and_report(0);
-        vTaskDelay(pdMS_TO_TICKS(200)); // Allow time for Zigbee transmission
-    }
-    
-    /* Reset sleep scheduling flag */
-    sleep_scheduled = false;
-    
-    /* Save rainfall data before sleeping */
-    float current_rainfall = total_rainfall_mm;
-    uint32_t current_pulses = rain_pulse_count;
-    save_rainfall_data(current_rainfall, current_pulses);
-    
-    /* Determine sleep duration based on network connection status */
-    uint32_t sleep_duration;
-    
-    if (!zigbee_network_connected) {
-        if (connection_retry_count >= MAX_CONNECTION_RETRIES) {
-            /* After max retries, use longer sleep to save battery but keep trying */
-            sleep_duration = sleep_duration_seconds / 2;  // Use half the configured duration
-            ESP_LOGW(TAG, "🔋 Max connection retries reached, using reduced sleep duration: %lu seconds", sleep_duration);
-        } else {
-            /* Not connected - short sleep for quick retry */
-            sleep_duration = NETWORK_RETRY_SLEEP_DURATION;
-            ESP_LOGW(TAG, "📡 Not connected to network, using short sleep for retry: %lu seconds (attempt %d/%d)", 
-                     sleep_duration, connection_retry_count + 1, MAX_CONNECTION_RETRIES);
-        }
-    } else {
-        /* Connected - use normal adaptive sleep duration */
-        sleep_duration = get_adaptive_sleep_duration(0.0f, sleep_duration_seconds);
-        ESP_LOGI(TAG, "🔌 Connected to network, using normal sleep duration: %lu seconds (%.1f minutes)", 
-                 sleep_duration, sleep_duration / 60.0f);
-    }
-    
-    ESP_LOGI(TAG, "💤 Entering light sleep for %lu seconds...", sleep_duration);
-    
-    /* Give time for log output */
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    /* Update rain gauge value before sleep */
-    rain_gauge_zigbee_update(0); // Send last rain value
-    vTaskDelay(pdMS_TO_TICKS(50)); // Allow time for Zigbee transmission
-    
-    /* NOTE: For light sleep, we do NOT suspend the Zigbee stack - it stays active */
-    /* The Zigbee stack will automatically enter low-power mode during light sleep */
-    
-    /* Enter light sleep with timer and GPIO wake-up enabled */
-    /* SED MODE: No manual sleep - Zigbee stack handles automatically */
-    // enter_light_sleep(sleep_duration, true);  // Disabled for SED mode
-    
-    /* Calculate next report time in milliseconds */
-    uint32_t next_report_ms = sleep_duration * 1000;
-    ESP_LOGI(TAG, "SED idle mode - next report in %lu sec", sleep_duration);
-    
-    /* Schedule next periodic sensor reporting */
-    esp_zb_scheduler_alarm((esp_zb_callback_t)sed_wake_and_report, 0, next_report_ms);
-}
-
-/**
- * @brief SED periodic wake callback - report sensors then return to idle
+/* NOTE: prepare_for_light_sleep() and sed_wake_and_report() functions removed.
+ * For Sleepy End Device (SED) mode with automatic sleep:
+ * - DO NOT use scheduler alarms for continuous operations
+ * - The Zigbee stack handles sleep/wake automatically via ESP_ZB_COMMON_SIGNAL_CAN_SLEEP
+ * - Device wakes naturally every keep_alive interval (7.5s) to poll parent
+ * - Continuous alarms prevent the CAN_SLEEP signal from ever triggering
+ * - Reports are now triggered on-demand or by external events (rain gauge, etc)
  */
-static void sed_wake_and_report(uint8_t param)
-{
-    ESP_LOGI(TAG, "SED periodic wake-up for sensor reporting");
-    
-    /* Execution continues here after wake-up from light sleep */
-    ESP_LOGI(TAG, "�️ Woke from light sleep, resuming operations...");
-    
-    /* Turn on LED after wake */
-    if (zigbee_network_connected) {
-        debug_led_set(true);
-    }
-    
-    /* Schedule sensor reporting after wake */
-    ESP_LOGI(TAG, "📊 Scheduling sensor data reporting after wake-up");
-    esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 1000); // Report in 1 second
-    esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 2000); // Report rainfall in 2 seconds
-    esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 3000); // Report battery in 3 seconds
-    esp_zb_scheduler_alarm((esp_zb_callback_t)sleep_duration_report, 0, 4000); // Report sleep duration in 4 seconds
-    
-    /* Schedule next sleep cycle */
-    if (!sleep_scheduled) {
-        ESP_LOGI(TAG, "⏰ Scheduling next sleep cycle");
-        esp_zb_scheduler_alarm((esp_zb_callback_t)prepare_for_light_sleep, 0, 15000);
-        sleep_scheduled = true;
-    }
-}
 
 // Helper to fill a Zigbee ZCL string (first byte = length, then chars)
 static void fill_zcl_string(char *buf, size_t bufsize, const char *src) {
@@ -798,18 +726,24 @@ static void esp_zb_task(void *pvParameters)
     zb_nwk_cfg.nwk_cfg.zed_cfg.ed_timeout = ESP_ZB_ED_AGING_TIMEOUT_64MIN;  // How long parent keeps us in child table
     zb_nwk_cfg.nwk_cfg.zed_cfg.keep_alive = 7500;  // Keep-alive polling interval (7.5 seconds)
     
-    /* Enable zigbee light sleep */
-    esp_zb_sleep_enable(true);
+    /* CRITICAL: Initialize stack FIRST, then enable sleep */
     esp_zb_init(&zb_nwk_cfg);
+    
+    /* Enable zigbee light sleep - MUST be called AFTER esp_zb_init() */
+    esp_zb_sleep_enable(true);
     
     /* Configure device as Sleepy End Device (rx_on_when_idle = false) */
     esp_zb_set_rx_on_when_idle(false);
     
-    /* Set sleep threshold to match keep_alive for consistent polling */
-    esp_zb_sleep_set_threshold(7500);  // Sleep after 7.5s idle, wake every 5s to poll
+    /* Set sleep threshold - 6 seconds provides good balance:
+     * - Allows quick sleep after reports complete
+     * - Well below 7.5s keep_alive interval (no timing conflicts)
+     * - Reduces unnecessary wake cycles for better battery life */
+    esp_zb_sleep_set_threshold(6000);  // 6 seconds idle before sleep signal
     
     ESP_LOGI(TAG, "🔋 Configured as Sleepy End Device (SED) - rx_on_when_idle=false");
-    ESP_LOGI(TAG, "📡 Poll interval: 7.5 seconds (keep_alive + sleep_threshold aligned)");
+    ESP_LOGI(TAG, "📡 Keep-alive poll interval: 7.5 seconds");
+    ESP_LOGI(TAG, "💤 Sleep threshold: 6.0 seconds (production optimized)");
     ESP_LOGI(TAG, "⏱️  Parent timeout: 64 minutes");
     
     /* Create endpoint list */
@@ -1183,11 +1117,15 @@ static void bme280_read_and_report(uint8_t param)
     /* BME280 automatically returns to sleep mode after forced measurement.
      * No explicit sleep call needed - sensor is already in low-power state. */
     
-    /* In SED mode with automatic sleep, schedule next periodic report.
-     * Device will automatically sleep between reports when idle. */
-    uint32_t next_report_ms = sleep_duration_seconds * 1000;
-    ESP_LOGI(TAG, "⏰ Next sensor report scheduled in %d seconds", sleep_duration_seconds);
-    esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, next_report_ms);
+    /* DO NOT reschedule here! Continuous scheduler alarms prevent light sleep.
+     * Instead, reporting will be triggered by:
+     * 1. Zigbee poll/wake cycles (keep_alive interval)
+     * 2. Attribute reporting configuration
+     * 3. Manual triggers when needed (rain events, etc.)
+     * 
+     * This allows the device to enter light sleep between Zigbee polls.
+     */
+    ESP_LOGI(TAG, "📊 Sensor data reported. Device will now enter light sleep until next Zigbee poll.");
 }
 
 /* Rain gauge implementation */
@@ -1841,8 +1779,8 @@ static void rain_gauge_init(void)
     ESP_LOGI(RAIN_TAG, "🔧 GPIO%d monitoring: level=%d, pull-down=enabled, trigger=RISING_EDGE", 
              RAIN_GAUGE_GPIO, gpio_get_level(RAIN_GAUGE_GPIO));
     
-    /* Report initial value to Zigbee after device joins network */
-    esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 10000); // 10 seconds delay
+    /* Initial rain value will be reported after network join (see signal handler) */
+    ESP_LOGI(RAIN_TAG, "Rain gauge ready - initial report will occur after network connection");
 }
 
 void app_main(void)
