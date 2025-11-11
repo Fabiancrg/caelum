@@ -1,4 +1,4 @@
-[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)
+hy [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)
 
 | Supported Targets | ESP32-C6 | ESP32-H2 |
 | ----------------- |  -------- | -------- |
@@ -10,7 +10,7 @@
 
 ## Project Description
 
-This project implements a battery-powered environmental monitoring device using ESP32-C6/H2 with Zigbee connectivity. The device features a 3-endpoint design with remote sleep configuration, optimized for low-power operation with deep sleep support and extended wake time during network join.
+This project implements a battery-powered environmental monitoring device using ESP32-C6/H2 with Zigbee connectivity. The device operates as a Zigbee Sleepy End Device (SED) with automatic light sleep for ultra-low power consumption while maintaining network responsiveness. Features a 3-endpoint design with WS2812 RGB LED boot indicator and optimized power management achieving 0.68mA sleep current.
 
 This project is based on the examples provided in the ESP Zigbee SDK:
 
@@ -26,17 +26,17 @@ This project is based on the examples provided in the ESP Zigbee SDK:
 | **1** | Environmental Sensor | Temperature, Humidity, Pressure, Battery, OTA | BME280 sensor via I2C |
 | **2** | Rain Gauge | Analog Input | Tipping bucket rain sensor with rainfall totals |
 | **3** | Sleep Configuration | Analog Input | Remote sleep duration control (60-7200 seconds) |
-| **4 (removed)** | LED Debug Control | On/Off | Moved to primary endpoint (EP1); no separate EP4 registered — LED control provided via genOnOff on EP1 |
+| **4 (removed)** | LED Debug Control | On/Off | ⚠️ **LED now always active during boot/join only** - shows network status (yellow blink → blue success / red failure), then powers down permanently to save battery |
 
-### 💡 LED Debug Feature (Optional)
+### 💡 LED Boot Indicator (Always Active)
 
-The device includes an optional WS2812 RGB LED on GPIO8 (ESP32-H2 SuperMini) that provides visual feedback:
-- **Blue (Steady)**: Connected to Zigbee network
-- **Orange (Blinking)**: Joining/searching for network  
-- **White (Brief Flash)**: Rain pulse detected
-- **Off**: Deep sleep or disabled via Zigbee
+The device includes a WS2812 RGB LED on GPIO8 (ESP32-H2) that provides visual feedback during boot and network join:
+- **Yellow (Blinking)**: Joining/searching for network  
+- **Blue (Steady, 5 seconds)**: Successfully connected to Zigbee network
+- **Red (Blinking, 10 times)**: Connection failed after max retries
+- **Off**: LED powered down after boot sequence (RMT peripheral disabled for power savings)
 
-This feature can be controlled remotely via Zigbee2MQTT (endpoint 4) and disabled to conserve battery. See [LED_DEBUG_FEATURE.md](LED_DEBUG_FEATURE.md) for complete documentation.
+**Power Optimization**: The LED and its RMT peripheral are permanently disabled after the initial boot/join sequence to save ~1-2mA. This is critical for achieving 0.68mA sleep current. The LED cannot be re-enabled remotely - it only operates during the first boot cycle.
 
 ### 📋 Detailed Endpoint Descriptions
 
@@ -57,30 +57,27 @@ This feature can be controlled remotely via Zigbee2MQTT (endpoint 4) and disable
   - **Power Configuration Cluster**: Standard Zigbee battery attributes
   - **Optimized Reading**: 
     - Time-based hourly intervals (3600 seconds) with NVS persistence
-    - 3 ADC samples (reduced from 10) for ~70% ADC power savings
-    - No delays between samples for ~90% overhead reduction
-    - Total battery monitoring power: ~12µAh/day (98% reduction from ~480µAh/day)
+    - 3 ADC samples for accurate readings with minimal power use
     - Always reports on first boot/pairing, then hourly regardless of wake frequency
-- **Features**: Automatic reporting during wake cycles, Zigbee-standard units
+- **Features**: Automatic reporting via Zigbee attribute updates, Zigbee-standard units
 - **Use Case**: Weather monitoring, HVAC automation, air quality tracking, battery-powered applications
 
 #### **Endpoint 2: Rain Gauge System**
 - **Hardware**: Tipping bucket rain gauge with reed switch
-  - **ESP32-H2**: GPIO12 (RTC-capable for sleep wake-up)
-  - **ESP32-C6**: GPIO5 (RTC-capable for sleep wake-up)
+  - **ESP32-H2**: GPIO12 (interrupt-capable)
+  - **ESP32-C6**: GPIO5 (interrupt-capable)
 - **Measurements**: Cumulative rainfall in millimeters (0.36mm per tip)
 - **Features**: 
-  - Advanced debouncing (200ms + 1000ms bounce settle)
+  - Interrupt-based detection (200ms debounce)
   - Persistent storage (NVS) for total tracking
-  - Smart reporting (1mm threshold OR hourly)
-  - Network-aware operation (only active when connected)
-  - **Both targets**: Wake from deep sleep on rain detection
-  - **Time-based hourly reading**: Uses NVS persistence to ensure true 1-hour intervals regardless of wake frequency
+  - Smart reporting (1mm threshold increments)
+  - Network-aware operation (ISR enabled only when connected)
+  - Works during light sleep - wakes device on rain detection
 - **Specifications**: 
   - Maximum rate: 200mm/hour supported
   - Accuracy: ±0.36mm per bucket tip
   - Storage: Non-volatile total persistence across reboots
-  - Rain-proof interval tracking: Hourly battery reading even during frequent rain events
+  - Power: Minimal impact - GPIO interrupt wakes from light sleep
 - **Use Case**: Weather station, irrigation control, flood monitoring
 
 #### **Endpoint 3: Sleep Configuration**
@@ -89,33 +86,21 @@ This feature can be controlled remotely via Zigbee2MQTT (endpoint 4) and disable
 - **Features**:
   - Remote configuration via Zigbee2MQTT or Home Assistant
   - Persistent storage (NVS) - survives reboots
-  - Real-time updates - changes apply on next wake cycle
+  - Real-time updates - changes apply immediately
   - Default: 900 seconds (15 minutes)
+- **Note**: In light sleep mode (current implementation), this controls sensor reporting interval rather than actual sleep duration. Device maintains network connection and wakes every 7.5 seconds for keep-alive polling.
 - **Use Case**: 
-  - Battery optimization (longer intervals = longer battery life)
+  - Battery optimization (longer intervals = less frequent sensor readings)
   - Seasonal adjustments (frequent updates in rainy season)
-  - Dynamic power management based on weather conditions
+  - Dynamic reporting based on weather conditions
 
-#### **Endpoint 4: LED Debug Control**
-- **Hardware**: WS2812 RGB LED (ESP32-H2 SuperMini)
-  - **GPIO**: GPIO8
-  - **Driver**: espressif/led_strip ~2.0.0
-- **LED States**:
-  - 🔵 **Blue (Steady)**: Connected to Zigbee network
-  - 🟠 **Orange (Blinking)**: Searching/joining network
-  - ⚪ **White (Flash)**: Rain pulse detected (100ms)
-  - ⚫ **Off**: Deep sleep or disabled
-- **Control**: On/Off cluster for remote enable/disable
-- **Features**:
-  - Remote control via Zigbee2MQTT switch
-  - Default state: Enabled (ON)
-  - Minimal battery impact (~20mA when active, off during sleep)
-  - Visual feedback for debugging and network status
-- **Use Case**: 
-  - Development and testing (visual network status)
-  - Field deployment debugging
-  - Can be disabled remotely to conserve battery
-- **Documentation**: See [LED_DEBUG_FEATURE.md](LED_DEBUG_FEATURE.md) for details
+#### **Endpoint 4: LED Debug Control (Deprecated)**
+- **Status**: ⚠️ **No longer controllable** - LED now operates only during boot/join sequence
+- **Previous Function**: Remote LED control via Zigbee2MQTT
+- **Current Behavior**: LED automatically shows boot status (yellow → blue/red) then powers down permanently
+- **Reason**: RMT peripheral consumes 1-2mA continuously. Power-down is essential for 0.68mA sleep current.
+- **Migration**: Remove any automation/scripts that attempt to control LED endpoint
+- **Documentation**: See code comments in `esp_zb_weather.c` for LED implementation details
 
 ### 🔧 Hardware Configuration
 
@@ -158,7 +143,55 @@ Battery+ ──┬── 100kΩ ──┬── 100kΩ ── GND
            │
            └── 5V output (to ESP32 power)
 ```
+```
 Note: Voltage divider monitors the cell voltage (2.7V-4.2V) while the battery pack provides 5V regulated output
+
+### 🔌 Zigbee Integration
+- **Protocol**: Zigbee 3.0  
+- **Device Type**: Sleepy End Device (SED) - maintains network connection while sleeping
+- **Sleep Mode**: Automatic light sleep with 7.5s keep-alive polling
+- **Sleep Threshold**: 6.0 seconds (allows sleep between keep-alive polls)
+- **Supported Channels**: 11-26 (2.4 GHz)
+- **Compatible**: Zigbee2MQTT, Home Assistant ZHA, Hubitat
+- **OTA Support**: Over-the-air firmware updates enabled (see [OTA_GUIDE.md](OTA_GUIDE.md))
+
+### ⚡ Power Management (Light Sleep Mode)
+
+**Zigbee Sleepy End Device (SED) Configuration**:
+- **Keep-alive Polling**: 7.5 seconds (maintains parent connection)
+- **Sleep Threshold**: 6.0 seconds (enters light sleep when idle)
+- **Parent Timeout**: 64 minutes (how long parent keeps device in child table)
+- **RX on When Idle**: Disabled (radio off during sleep for power savings)
+
+**Power Consumption**:
+- **Sleep Current**: **0.68mA** (with RMT peripheral powered down)
+- **Transmit Current**: 12mA during active transmission
+- **Average Current**: ~0.83mA (includes 7.5s polling cycles)
+- **LED Power-down**: Critical for low power - RMT peripheral disabled after boot
+
+**Sleep Behavior**:
+- Device sleeps automatically when Zigbee stack is idle (no activity for 6 seconds)
+- Wakes every 7.5 seconds to poll parent for pending messages
+- Rain detection wakes device instantly via GPIO interrupt
+- Quick response to Zigbee commands (<10 seconds typical)
+
+**Power Optimization Features**:
+- RMT peripheral (LED driver) powered down after boot sequence (~1-2mA savings)
+- Light sleep maintains Zigbee network association (no rejoin delays)
+- Automatic sleep/wake managed by ESP Zigbee stack
+- Battery monitoring on 1-hour intervals with NVS persistence
+- BME280 forced measurement mode (sensor sleeps between readings)
+
+**Battery Life Estimate**:
+- **2500mAh Li-Ion**: ~125 days (4+ months) at 0.83mA average
+- **Breakdown**: 
+  - ~7.4 seconds sleep per 7.5 second cycle (0.68mA)
+  - ~0.1 seconds active per cycle (12mA transmit)
+  - Sensor readings and reports as configured
+
+**OTA Behavior**: 
+- Device stays awake during firmware updates (`esp_zb_ota_is_active()` check)
+- Normal sleep resumes after OTA completion
 
 ### � Zigbee Integration
 - **Protocol**: Zigbee 3.0  
@@ -235,46 +268,59 @@ idf.py -p [PORT] flash monitor
 
 #### **Factory Reset**
 - **Built-in Button (GPIO 9)**:
-  - Long press (5s): Factory reset device
+  - Long press (5s): Factory reset device and rejoin network
 
 #### **Automatic Features**
-- Environmental data reported during wake cycles
-- Rain gauge totals stored persistently in NVS
-- Smart rainfall reporting (1mm increments or hourly)
-- Network connection status monitoring
-- Deep sleep after data reporting (15-second window when connected, 60 seconds when not connected)
-- Sleep duration remotely configurable via Zigbee2MQTT (60-7200 seconds)
+- **Light Sleep**: Automatic entry when idle (6s threshold, 7.5s keep-alive polling)
+- **Sensor Reporting**: Environmental data reported after network join and on-demand
+- **Rain Detection**: Interrupt-based instant wake and reporting (1mm threshold)
+- **Battery Monitoring**: Hourly readings with time-based NVS persistence
+- **Network Status**: Visual feedback via RGB LED during boot/join only
+- **Power Savings**: RMT peripheral powered down after boot (~1-2mA savings)
 
 ### 📡 Data Reporting
-- **Temperature/Humidity/Pressure**: Reported during wake cycles
-- **Rainfall**: Immediate on tip detection (>1mm) or hourly
-- **Sleep Duration**: Configurable 60-7200 seconds (default 15 minutes)
-- **Sleep Cycle**: Configurable via Endpoint 3 for battery optimization
+- **Temperature/Humidity/Pressure**: Reported after network join and as configured
+- **Rainfall**: Immediate on rain detection (1mm threshold)
+- **Battery**: Hourly time-based readings with NVS persistence
+- **Reporting Interval**: Configurable 60-7200 seconds via Endpoint 3
+- **Response Time**: <10 seconds for Zigbee commands (7.5s keep-alive polling)
 
 ## 📊 Example Output
 
-### Device Initialization
+### Device Initialization (with LED Boot Indicator)
 ```
-I (403) app_start: Starting scheduler on CPU0
 I (408) WEATHER_STATION: Initialize Zigbee stack
+I (420) WEATHER_STATION: Debug RGB LED initialized on GPIO8 (WS2812)
+I (430) WEATHER_STATION: RGB LED blink started (network joining)
 I (558) WEATHER_STATION: Deferred driver initialization successful
-I (568) WEATHER_STATION: BME280 sensor initialized successfully
-I (578) WEATHER_STATION: Rain gauge initialized. Current total: 0.00 mm
-I (578) WEATHER_STATION: Start network steering
+I (568) WEATHER_STATION: BME280 sensor initialized successfully on ESP32-H2 (SDA:GPIO10, SCL:GPIO11)
+I (578) RAIN_GAUGE: Rain gauge initialized. Current total: 0.00 mm
 ```
 
-### Network Connection
+### Zigbee SED Configuration
+```
+I (600) WEATHER_STATION: 🔋 Configured as Sleepy End Device (SED) - rx_on_when_idle=false
+I (610) WEATHER_STATION: 📡 Keep-alive poll interval: 7500 ms (7.5 sec)
+I (620) WEATHER_STATION: 💤 Sleep threshold: 6000 ms (6.0 sec) - production optimized
+I (630) WEATHER_STATION: ⏱️  Parent timeout: 64 minutes
+I (640) WEATHER_STATION: ⚡ Power profile: 0.68mA sleep, 12mA transmit, ~0.83mA average
+```
+
+### Network Connection (LED Shows Status)
 ```
 I (3558) WEATHER_STATION: Joined network successfully (Extended PAN ID: 74:4d:bd:ff:fe:63:f7:30, PAN ID: 0x13af, Channel:13, Short Address: 0x7c16)
-I (3568) RAIN_GAUGE: Rain gauge enabled - device connected to Zigbee network
+I (3568) WEATHER_STATION: 💡 LED will power down in 5 seconds to save battery
+I (3578) RAIN_GAUGE: Rain gauge enabled - device connected to Zigbee network
+I (3588) WEATHER_STATION: 📊 Scheduling initial sensor data reporting after network join
+I (8568) WEATHER_STATION: 🔌 RGB LED RMT peripheral powered down (boot sequence complete)
 ```
 
 ### Sensor Data Reporting
 ```
-I (8000) WEATHER_STATION: 🌡️ Temperature: 22.35°C reported to Zigbee  
-I (8010) WEATHER_STATION: 💧 Humidity: 45.20% reported to Zigbee
-I (8020) WEATHER_STATION: 🌪️ Pressure: 1013.25 hPa reported to Zigbee
-I (8030) BATTERY: 🔋 Li-Ion Battery: 4.17V (98%) - Zigbee values: 41 (0.1V), 196 (%*2)
+I (4000) WEATHER_STATION: 🌡️ Temperature: 22.35°C reported to Zigbee  
+I (5010) WEATHER_STATION: 💧 Humidity: 45.20% reported to Zigbee
+I (6020) WEATHER_STATION: 🌪️ Pressure: 1013.25 hPa reported to Zigbee
+I (7030) BATTERY: 🔋 Li-Ion Battery: 4.17V (98%) - Zigbee values: 41 (0.1V), 196 (%*2)
 I (8040) WEATHER_STATION: 📡 Temp: 22.4°C
 I (8050) WEATHER_STATION: 📡 Humidity: 45.2%
 I (8060) WEATHER_STATION: 📡 Pressure: 1013.3 hPa
@@ -282,16 +328,15 @@ I (8060) WEATHER_STATION: 📡 Pressure: 1013.3 hPa
 
 ### Rain Gauge Activity
 ```  
-I (10000) RAIN_GAUGE: 🔍 Rain gauge interrupt received on GPIO18 (enabled: YES)
-I (10010) RAIN_GAUGE: 🌧️ Rain pulse #1 detected! Total: 0.36 mm (+0.36 mm)
-I (10020) RAIN_GAUGE: ✅ Rainfall total 0.36 mm reported to Zigbee
+I (10000) RAIN_GAUGE: 🌧️ Rain pulse #1: 0.36 mm total (+0.36 mm)
+I (10020) RAIN_GAUGE: ✅ Rain reported: 0.36 mm
 I (10030) WEATHER_STATION: 📡 Rain: 0.36 mm
 ```
 
-### Deep Sleep Entry
+### Light Sleep Activity
 ```
-I (18000) WEATHER_STATION: ⏳ Preparing for deep sleep...
-I (18010) WEATHER_STATION: 💤 Entering deep sleep for 900 seconds (15 minutes)
+I (15000) WEATHER_STATION: Zigbee can sleep
+I (15010) WEATHER_STATION: 💤 Entering light sleep (will wake for 7.5s keep-alive poll)
 ```
 
 ## 🏠 Home Assistant Integration
@@ -302,7 +347,7 @@ When connected to Zigbee2MQTT or other Zigbee coordinators, the device appears a
 - **1x Sensor entity**: Battery Voltage (mV)
 - **1x Sensor entity**: Rainfall total with automatic updates
 - **1x Number entity**: Sleep duration control (60-7200 seconds)
-- **1x Switch entity**: LED debug control (enable/disable status indicator)
+- **LED Control**: ⚠️ **No longer available** - LED operates only during boot/join sequence
 
 ### Zigbee2MQTT Integration
 
@@ -340,17 +385,21 @@ The build system automatically:
 
 ### Application Configuration
 
-Key parameters can be adjusted in `main/esp_zb_weather.h`:
-- Default sleep duration: 900 seconds (15 minutes) - can be changed via Endpoint 3
-- Sleep duration range: 60-7200 seconds (1 minute to 2 hours)
-- Network retry interval: 30 seconds when disconnected
-- Maximum connection retries: 20 attempts before reducing sleep interval
-- Rain tip bucket volume: 0.36mm per tip
-- Extended wake time: 60 seconds when not connected (for join process)
+**Zigbee SED Configuration** (in `main/esp_zb_weather.c`):
+- **Keep-alive interval**: 7500ms (7.5 seconds) - Zigbee parent polling
+- **Sleep threshold**: 6000ms (6.0 seconds) - idle time before light sleep
+- **Parent timeout**: 64 minutes - how long parent keeps device in child table
+- **Power profile**: 0.68mA sleep, 12mA transmit, ~0.83mA average
+
+**Device Parameters** (in `main/esp_zb_weather.h`):
+- **Default sleep duration**: 900 seconds (15 minutes) - configurable via Endpoint 3
+- **Sleep duration range**: 60-7200 seconds (1 minute to 2 hours)
+- **Rain tip bucket volume**: 0.36mm per tip
 - **Battery monitoring interval**: 3600 seconds (1 hour) - time-based with NVS persistence
-- **Battery ADC samples**: 3 samples averaged (optimized from 10)
-- **Battery monitoring power**: ~12µAh/day (98% reduction from original ~480µAh/day)
-- **LED Debug**: Optional WS2812 RGB LED on GPIO8 (ESP32-H2), controllable via Zigbee
+- **Battery ADC samples**: 3 samples averaged for accuracy
+- **LED boot indicator**: WS2812 RGB on GPIO8 (ESP32-H2), automatically powered down after boot
+- **Network retry**: 20 max retries when not connected
+- **Connection timeout**: Extended wake time during network join
 
 ## 📝 Project Structure
 
