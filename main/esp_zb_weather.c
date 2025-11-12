@@ -1073,7 +1073,13 @@ static void IRAM_ATTR rain_gauge_isr_handler(void *arg)
         .gpio_num = gpio_num,
         .tick = xTaskGetTickCountFromISR(),
     };
-    xQueueSendFromISR(rain_gauge_evt_queue, &evt, &xHigherPriorityTaskWoken);
+    
+    /* Only queue event if there's space - prevents overflow from rapid pulses */
+    if (xQueueSendFromISR(rain_gauge_evt_queue, &evt, &xHigherPriorityTaskWoken) != pdPASS) {
+        /* Queue full - pulse will be lost but prevents crash */
+        static uint32_t queue_overflow_count = 0;
+        queue_overflow_count++;
+    }
     
     if (xHigherPriorityTaskWoken) {
         portYIELD_FROM_ISR();
@@ -1084,7 +1090,9 @@ static void rain_gauge_task(void *arg)
 {
     rain_evt_t evt;
     TickType_t last_pulse_time = 0;
+    TickType_t last_zigbee_update = 0;
     const TickType_t DEBOUNCE_TIME = pdMS_TO_TICKS(200); // 200ms debounce
+    const TickType_t ZIGBEE_UPDATE_THROTTLE = pdMS_TO_TICKS(500); // Max 1 update per 500ms
     
     ESP_LOGI(RAIN_TAG, "Rain gauge task started, waiting for events...");
 
@@ -1111,10 +1119,19 @@ static void rain_gauge_task(void *arg)
                     save_rainfall_data(total_rainfall_mm, rain_pulse_count);
                 }
                 
-                // Update Zigbee attribute on every pulse (coordinator controls when reports are sent)
-                if (rain_gauge_enabled) {
-                    ESP_LOGI(RAIN_TAG, "📡 Updating rain attribute to %.2f mm", total_rainfall_mm);
-                    esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 10);
+                // Update Zigbee attribute (throttled to prevent overwhelming the stack with rapid pulses)
+                if (rain_gauge_enabled && zigbee_network_connected) {
+                    TickType_t time_since_last_update = current_time - last_zigbee_update;
+                    if (time_since_last_update > ZIGBEE_UPDATE_THROTTLE || last_zigbee_update == 0) {
+                        ESP_LOGI(RAIN_TAG, "📡 Updating rain attribute to %.2f mm", total_rainfall_mm);
+                        esp_zb_scheduler_alarm((esp_zb_callback_t)rain_gauge_zigbee_update, 0, 100);
+                        last_zigbee_update = current_time;
+                    } else {
+                        ESP_LOGD(RAIN_TAG, "Zigbee update throttled (will update after %u ms)",
+                                 pdTICKS_TO_MS(ZIGBEE_UPDATE_THROTTLE - time_since_last_update));
+                    }
+                } else if (!zigbee_network_connected) {
+                    ESP_LOGW(RAIN_TAG, "Rain pulse detected but network disconnected - will update when reconnected");
                 }
             } else {
                 ESP_LOGD(RAIN_TAG, "Pulse ignored - debounce active (%u ms)", 
