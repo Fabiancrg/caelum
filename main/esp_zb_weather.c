@@ -33,6 +33,7 @@
 #include "esp_timer.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
+#include "esp_rom_uart.h"
 /* Generated header with FW_VERSION / FW_DATE_CODE - created at configure time */
 #include "version.h"
 
@@ -426,7 +427,15 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             break;
         }
         
-        ESP_LOGI(TAG, "Zigbee can sleep");
+        /* Optional: Log sleep cycles for debugging (uncomment to see wake/sleep activity)
+         * Note: This will increase power consumption due to UART activity
+         */
+        static uint32_t sleep_count = 0;
+        ESP_LOGI(TAG, "💤 Sleep cycle #%lu", ++sleep_count);
+        
+        /* Flush UART to ensure log is printed before sleeping */
+        esp_rom_output_tx_wait_idle(CONFIG_ESP_CONSOLE_UART_NUM);
+        
         /* LED is already deinitialized after successful join - no action needed */
         esp_zb_sleep_now();
         break;
@@ -654,10 +663,14 @@ static void esp_zb_task(void *pvParameters)
     
     /* Create Pressure measurement cluster with REPORTING flag */
     int16_t pressure_value = ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_UNKNOWN;  // Invalid/unknown initially
+    int16_t pressure_min = 300 * 10;   // 300 hPa in 0.1 kPa units (30 kPa minimum)
+    int16_t pressure_max = 1100 * 10;  // 1100 hPa in 0.1 kPa units (110 kPa maximum)
     esp_zb_attribute_list_t *esp_zb_pressure_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT);
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(esp_zb_pressure_cluster, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
                                             ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_S16,
                                             ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &pressure_value));
+    ESP_ERROR_CHECK(esp_zb_pressure_meas_cluster_add_attr(esp_zb_pressure_cluster, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_MIN_VALUE_ID, &pressure_min));
+    ESP_ERROR_CHECK(esp_zb_pressure_meas_cluster_add_attr(esp_zb_pressure_cluster, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_MAX_VALUE_ID, &pressure_max));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_pressure_meas_cluster(esp_zb_bme280_clusters, esp_zb_pressure_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     
     /* Add Identify cluster for BME280 endpoint */

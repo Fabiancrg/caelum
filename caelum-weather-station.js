@@ -13,7 +13,7 @@ export default {
                 unit: "°C",
                 access: "STATE_GET",
                 precision: 1,
-                reporting: {min: 0, max: 600, change: 0.1},
+                reporting: {min: 10, max: 3600, change: 0.1},
             }
         ),
         m.humidity(),
@@ -25,7 +25,7 @@ export default {
                 access: "STATE_GET",
                 precision: 1,
                 icon: "mdi:gauge",
-                reporting: {min: 0, max: 600, change: 0.1},
+                reporting: {min: 10, max: 3600, change: 0.1},
             }
         ),
         m.battery(),
@@ -36,7 +36,7 @@ export default {
                 property: "rain_amount",
                 cluster: "genAnalogInput",
                 attribute: "presentValue",
-                reporting: {"min":0,"max":600,"change":0.1},
+                reporting: {"min":0,"max":3600,"change":0.3},
                 description: "Total rainfall",
                 unit: "mm",
                 precision: 1,
