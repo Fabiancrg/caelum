@@ -203,7 +203,7 @@ void enter_light_sleep(uint32_t duration_seconds, bool enable_gpio_wakeup)
         gpio_wakeup_enabled = true;
         ESP_LOGI(SLEEP_TAG, "🌧️ Rain wake-up enabled on GPIO%d", RAIN_WAKE_GPIO);
     }
-    
+
     /* Disable LEDs to save power */
     ESP_LOGI(SLEEP_TAG, "💡 Disabling LEDs...");
     // LED strip and GPIO LED should already be off
@@ -240,7 +240,7 @@ void enter_light_sleep(uint32_t duration_seconds, bool enable_gpio_wakeup)
     
     /* CRITICAL: Disable Zigbee sleep mode after wake */
     esp_zb_sleep_enable(false);
-    
+
     /* Calculate sleep duration */
     uint32_t sleep_time_ms = (uint32_t)((t_after_sleep - t_before_sleep) / 1000);
     
