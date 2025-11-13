@@ -185,32 +185,31 @@ static void debug_led_blink_red(void)
 #define RAIN_GAUGE_GPIO         12              // GPIO pin for rain gauge reed switch
 #define RAIN_MM_PER_PULSE       0.36f           // mm of rain per bucket tip (adjust for your sensor)
 
-/* Rain gauge variables */
+typedef enum {
+    RAIN_EVENT_PULSE = 0,
+    RAIN_EVENT_FLUSH,
+} rain_event_type_t;
+
+/* Rain gauge queue event */
 typedef struct {
-    uint32_t gpio_num;
+    rain_event_type_t type;
     TickType_t tick;
+    bool force_nvs;
+    bool force_attribute;
 } rain_evt_t;
 
-/* Zigbee update event structure */
-typedef struct {
-    uint16_t cluster_id;
-    uint16_t attr_id;
-    void *value;
-    uint8_t value_size;
-} zigbee_update_evt_t;
-
 static QueueHandle_t rain_gauge_evt_queue = NULL;
-static SemaphoreHandle_t rain_update_mutex = NULL; // Protect concurrent attribute updates
-static QueueHandle_t zigbee_update_queue = NULL; // Queue for Zigbee updates
-static TaskHandle_t zigbee_update_task_handle = NULL; // Task handle for Zigbee updates
 static float total_rainfall_mm = 0.0f;
 static uint32_t rain_pulse_count = 0;
 static const char *RAIN_TAG = "RAIN_GAUGE";
 static bool rain_gauge_enabled = false;  // Only enable when connected to network
 static bool rain_gauge_isr_installed = false;  // Track ISR installation state
+static esp_timer_handle_t rain_flush_timer = NULL;
 
 /* Periodic sensor reading interval (5 minutes as per requirements) */
 #define PERIODIC_READING_INTERVAL_MS (5 * 60 * 1000ULL)  // 5 minutes in milliseconds
+#define RAIN_PULSE_FLUSH_THRESHOLD   10U
+#define RAIN_FLUSH_INTERVAL_US       (10ULL * 1000ULL * 1000ULL) // 10 seconds
 static esp_timer_handle_t periodic_report_timer = NULL;
 
 /* Network connection status (zigbee_network_connected declared earlier for LED functions) */
@@ -230,6 +229,9 @@ static void stop_periodic_reading(void);
 static void rain_gauge_init(void);
 static void rain_gauge_isr_handler(void *arg);
 static void rain_gauge_task(void *arg);
+static void rain_flush_timer_callback(void *arg);
+static void rain_gauge_request_flush(bool force_nvs, bool force_attribute);
+static void rain_gauge_flush_totals(bool save_to_nvs, bool update_attribute);
 static void rain_gauge_enable_isr(void);
 static void rain_gauge_disable_isr(void);
 static esp_err_t battery_adc_init(void);
@@ -394,16 +396,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
              * After reboot, reporting config is lost and must be reconfigured by coordinator. */
             ESP_LOGI(TAG, "📊 Scheduling initial sensor data updates after network join");
             esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 2000); // Update in 2 seconds
-            // Send rain gauge update to queue instead of scheduling alarm
-            zigbee_update_evt_t rain_update_evt = {
-                .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
-                .attr_id = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
-                .value = &total_rainfall_mm,
-                .value_size = sizeof(total_rainfall_mm)
-            };
-            if (xQueueSend(zigbee_update_queue, &rain_update_evt, 0) != pdTRUE) {
-                ESP_LOGW(RAIN_TAG, "Failed to queue initial rain update - queue full");
-            }
+            // Queue rain gauge flush to publish current total after network join
+            rain_gauge_request_flush(false, true);
             esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 4000); // Update in 4 seconds
             
             /* Start periodic sensor reading timer for 15-minute intervals.
@@ -455,7 +449,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         }        
         
         /* LED is already deinitialized after successful join - no action needed */
-        //esp_zb_sleep_now();
+        esp_zb_sleep_now();
         break;
     default:
         ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type,
@@ -1025,16 +1019,7 @@ static void periodic_sensor_report_callback(void *arg)
          * The Zigbee stack will automatically send reports based on the coordinator's
          * reporting configuration (min/max intervals, reportable change thresholds). */
         esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 100);
-        // Send rain gauge update to queue instead of scheduling alarm
-        zigbee_update_evt_t rain_update_evt = {
-            .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
-            .attr_id = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
-            .value = &total_rainfall_mm,
-            .value_size = sizeof(total_rainfall_mm)
-        };
-        if (xQueueSend(zigbee_update_queue, &rain_update_evt, 0) != pdTRUE) {
-            ESP_LOGW(RAIN_TAG, "Failed to queue periodic rain update - queue full");
-        }
+        rain_gauge_request_flush(false, true);
         /* Battery is read hourly based on its own time tracking */
         esp_zb_scheduler_alarm((esp_zb_callback_t)battery_read_and_report, 0, 300);
     } else {
@@ -1090,7 +1075,6 @@ static void stop_periodic_reading(void)
 /* Rain gauge implementation */
 static void IRAM_ATTR rain_gauge_isr_handler(void *arg)
 {
-    uint32_t gpio_num = RAIN_GAUGE_GPIO;
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
     // ISR-safe: just increment a counter for debugging (can view in logs after interrupt)
@@ -1099,8 +1083,10 @@ static void IRAM_ATTR rain_gauge_isr_handler(void *arg)
 
     /* Prepare event with ISR tick for accurate timing */
     rain_evt_t evt = {
-        .gpio_num = gpio_num,
+        .type = RAIN_EVENT_PULSE,
         .tick = xTaskGetTickCountFromISR(),
+        .force_nvs = false,
+        .force_attribute = false,
     };
     
     /* Only queue event if there's space - prevents overflow from rapid pulses */
@@ -1119,125 +1105,130 @@ static void rain_gauge_task(void *arg)
 {
     rain_evt_t evt;
     TickType_t last_pulse_time = 0;
-    TickType_t last_zigbee_update = 0;
+    uint32_t pending_pulse_count = 0;
+    bool pending_nvs_flush = false;
+    bool pending_attr_flush = false;
     const TickType_t DEBOUNCE_TIME = pdMS_TO_TICKS(200); // 200ms debounce
-    const TickType_t ZIGBEE_UPDATE_THROTTLE = pdMS_TO_TICKS(500); // Max 1 update per 500ms
-    const TickType_t NVS_SAVE_INTERVAL = pdMS_TO_TICKS(5000); // Save to NVS at most every 5 seconds
-    const uint32_t NVS_SAVE_PULSE_BATCH = 5; // Or save after this many pulses
-    
+
     ESP_LOGI(RAIN_TAG, "Rain gauge task started, waiting for events...");
 
     for (;;) {
-        // Wait indefinitely for rain events - allows device to sleep when no rain
         if (xQueueReceive(rain_gauge_evt_queue, &evt, portMAX_DELAY)) {
-            TickType_t current_time = evt.tick;
-            
-            // Simple debounce check - only check timing, not GPIO level
-            // (GPIO may have already returned LOW by the time we process the event)
-            if ((current_time - last_pulse_time) > DEBOUNCE_TIME) {
-                // Valid pulse - update counters
-                last_pulse_time = current_time;
-                rain_pulse_count++;
-                total_rainfall_mm += RAIN_MM_PER_PULSE;
-                total_rainfall_mm = roundf(total_rainfall_mm * 100.0f) / 100.0f; // Round to 2 decimals
-                
-                ESP_LOGI(RAIN_TAG, "🌧️ Rain pulse #%u: %.2f mm total (+%.2f mm)",
-                         rain_pulse_count, total_rainfall_mm, RAIN_MM_PER_PULSE);
-                
-                // Batch NVS writes to avoid heavy I/O during bursty pulses which
-                // can interfere with RTOS critical sections under high interrupt load.
-                static TickType_t last_nvs_save = 0;
-                static uint32_t pulses_since_save = 0;
-                pulses_since_save++;
-                TickType_t now = current_time;
-                if ((pulses_since_save >= NVS_SAVE_PULSE_BATCH) ||
-                    (now - last_nvs_save) >= NVS_SAVE_INTERVAL) {
-                    save_rainfall_data(total_rainfall_mm, rain_pulse_count);
-                    last_nvs_save = now;
-                    pulses_since_save = 0;
-                }
-                
-                // Update Zigbee attribute (throttled to prevent overwhelming the stack with rapid pulses)
-                if (rain_gauge_enabled && zigbee_network_connected) {
-                    TickType_t time_since_last_update = current_time - last_zigbee_update;
-                    if (time_since_last_update > ZIGBEE_UPDATE_THROTTLE || last_zigbee_update == 0) {
-                        ESP_LOGI(RAIN_TAG, "📡 Updating rain attribute to %.2f mm", total_rainfall_mm);
-                        // Send event to Zigbee update task instead of scheduling alarm
-                        zigbee_update_evt_t update_evt = {
-                            .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
-                            .attr_id = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
-                            .value = &total_rainfall_mm,
-                            .value_size = sizeof(total_rainfall_mm)
-                        };
-                        if (xQueueSend(zigbee_update_queue, &update_evt, 0) != pdTRUE) {
-                            ESP_LOGW(RAIN_TAG, "Failed to queue Zigbee update - queue full");
+            switch (evt.type) {
+            case RAIN_EVENT_PULSE: {
+                TickType_t current_time = evt.tick;
+
+                if ((current_time - last_pulse_time) > DEBOUNCE_TIME) {
+                    last_pulse_time = current_time;
+                    pending_pulse_count++;
+                    rain_pulse_count++;
+                    total_rainfall_mm += RAIN_MM_PER_PULSE;
+                    total_rainfall_mm = roundf(total_rainfall_mm * 100.0f) / 100.0f;
+
+                    ESP_LOGI(RAIN_TAG, "🌧️ Rain pulse #%u: %.2f mm total (+%.2f mm)",
+                             rain_pulse_count, total_rainfall_mm, RAIN_MM_PER_PULSE);
+
+                    pending_nvs_flush = true;
+                    if (rain_gauge_enabled && zigbee_network_connected) {
+                        pending_attr_flush = true;
+                    }
+
+                    if (pending_pulse_count >= RAIN_PULSE_FLUSH_THRESHOLD) {
+                        ESP_LOGD(RAIN_TAG, "Pulse threshold reached (%u) - flushing totals", pending_pulse_count);
+                        rain_gauge_flush_totals(pending_nvs_flush, pending_attr_flush);
+                        pending_pulse_count = 0;
+                        pending_nvs_flush = false;
+                        pending_attr_flush = false;
+                        if (rain_flush_timer != NULL) {
+                            esp_timer_stop(rain_flush_timer);
                         }
-                        last_zigbee_update = current_time;
                     } else {
-                        ESP_LOGD(RAIN_TAG, "Zigbee update throttled (will update after %u ms)",
-                                 pdTICKS_TO_MS(ZIGBEE_UPDATE_THROTTLE - time_since_last_update));
-                        // If throttled, ensure at least one update occurs after the throttle
-                        // by queuing it at the throttle expiry only once.
-                        static bool scheduled_after_throttle = false;
-                        if (!scheduled_after_throttle) {
-                            // Send delayed update event (simplified - just queue immediately for now)
-                            zigbee_update_evt_t update_evt = {
-                                .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
-                                .attr_id = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
-                                .value = &total_rainfall_mm,
-                                .value_size = sizeof(total_rainfall_mm)
-                            };
-                            if (xQueueSend(zigbee_update_queue, &update_evt, 0) != pdTRUE) {
-                                ESP_LOGW(RAIN_TAG, "Failed to queue delayed Zigbee update - queue full");
-                            }
-                            scheduled_after_throttle = true;
-                        }
-                        if (time_since_last_update > ZIGBEE_UPDATE_THROTTLE) {
-                            scheduled_after_throttle = false;
+                        if (rain_flush_timer != NULL) {
+                            esp_timer_stop(rain_flush_timer);
+                            esp_timer_start_once(rain_flush_timer, RAIN_FLUSH_INTERVAL_US);
                         }
                     }
-                } else if (!zigbee_network_connected) {
-                    ESP_LOGW(RAIN_TAG, "Rain pulse detected but network disconnected - will update when reconnected");
+                } else {
+                    ESP_LOGD(RAIN_TAG, "Pulse ignored - debounce active (%u ms)",
+                             pdTICKS_TO_MS(current_time - last_pulse_time));
                 }
-            } else {
-                ESP_LOGD(RAIN_TAG, "Pulse ignored - debounce active (%u ms)", 
-                         pdTICKS_TO_MS(current_time - last_pulse_time));
+                break;
+            }
+
+            case RAIN_EVENT_FLUSH: {
+                bool do_nvs = pending_nvs_flush || evt.force_nvs;
+                bool do_attr = pending_attr_flush || evt.force_attribute;
+
+                if (do_nvs || do_attr) {
+                    rain_gauge_flush_totals(do_nvs, do_attr);
+                    pending_pulse_count = 0;
+                    pending_nvs_flush = false;
+                    pending_attr_flush = false;
+                }
+                if (rain_flush_timer != NULL) {
+                    esp_timer_stop(rain_flush_timer);
+                }
+                break;
+            }
+
+            default:
+                break;
             }
         }
     }
 }
 
-static void zigbee_update_task(void *arg)
+static void rain_flush_timer_callback(void *arg)
 {
-    zigbee_update_evt_t evt;
-    ESP_LOGI(RAIN_TAG, "Zigbee update task started, waiting for events...");
+    rain_gauge_request_flush(false, false);
+}
 
-    for (;;) {
-        // Wait for Zigbee update events
-        if (xQueueReceive(zigbee_update_queue, &evt, portMAX_DELAY)) {
-            // Take mutex to serialize Zigbee attribute updates
-            if (rain_update_mutex != NULL) {
-                if (xSemaphoreTake(rain_update_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    // Update the Zigbee attribute
-                    esp_zb_zcl_set_attribute_val(evt.cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT ? HA_ESP_RAIN_GAUGE_ENDPOINT : HA_ESP_BME280_ENDPOINT,
-                                               evt.cluster_id,
-                                               ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                               evt.attr_id,
-                                               evt.value,
-                                               false);
-                    xSemaphoreGive(rain_update_mutex);
-                } else {
-                    ESP_LOGW(RAIN_TAG, "Failed to acquire mutex for Zigbee update");
-                }
-            } else {
-                // No mutex - direct update (not recommended)
-                esp_zb_zcl_set_attribute_val(evt.cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT ? HA_ESP_RAIN_GAUGE_ENDPOINT : HA_ESP_BME280_ENDPOINT,
-                                           evt.cluster_id,
-                                           ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                           evt.attr_id,
-                                           evt.value,
-                                           false);
-            }
+static void rain_gauge_request_flush(bool force_nvs, bool force_attribute)
+{
+    if (rain_gauge_evt_queue == NULL) {
+        return;
+    }
+
+    rain_evt_t evt = {
+        .type = RAIN_EVENT_FLUSH,
+        .tick = xTaskGetTickCount(),
+        .force_nvs = force_nvs,
+        .force_attribute = force_attribute,
+    };
+
+    if (xQueueSend(rain_gauge_evt_queue, &evt, 0) != pdPASS) {
+        ESP_LOGW(RAIN_TAG, "Failed to queue rain flush event (queue full)");
+    }
+}
+
+static void rain_gauge_flush_totals(bool save_to_nvs, bool update_attribute)
+{
+    float rounded_rainfall = roundf(total_rainfall_mm * 100.0f) / 100.0f;
+
+    if (save_to_nvs) {
+        ESP_LOGI(RAIN_TAG, "💾 Flushing rain totals to storage: %.2f mm (%u pulses)",
+                 rounded_rainfall, rain_pulse_count);
+        save_rainfall_data(rounded_rainfall, rain_pulse_count);
+    }
+
+    if (update_attribute) {
+        if (!rain_gauge_enabled || !zigbee_network_connected) {
+            ESP_LOGW(RAIN_TAG, "Skipping Zigbee update - network not ready");
+            return;
+        }
+
+        esp_err_t ret = esp_zb_zcl_set_attribute_val(
+            HA_ESP_RAIN_GAUGE_ENDPOINT,
+            ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
+            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+            ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+            &rounded_rainfall,
+            false);
+
+        if (ret == ESP_OK) {
+            ESP_LOGI(RAIN_TAG, "📡 Rain attribute updated: %.2f mm", rounded_rainfall);
+        } else {
+            ESP_LOGE(RAIN_TAG, "Failed to update rain attribute: %s", esp_err_to_name(ret));
         }
     }
 }
@@ -1285,6 +1276,9 @@ static void rain_gauge_disable_isr(void)
         rain_gauge_enabled = false;
         ESP_LOGI(RAIN_TAG, "Rain gauge ISR already disabled");
     }
+
+    /* Persist any accumulated rainfall before going idle */
+    rain_gauge_request_flush(true, false);
 }
 
 /* Battery monitoring functions */
@@ -1628,30 +1622,20 @@ static void rain_gauge_init(void)
     int initial_level = gpio_get_level(RAIN_GAUGE_GPIO);
     ESP_LOGI(RAIN_TAG, "🔌 Initial GPIO%d level: %d (with pull-down)", RAIN_GAUGE_GPIO, initial_level);
     
-    /* Create queue for GPIO events (include ISR tick to disambiguate duplicates) */
-    rain_gauge_evt_queue = xQueueCreate(10, sizeof(rain_evt_t));
+    /* Create queue for rain events (GPIO pulses + flush requests) */
+    rain_gauge_evt_queue = xQueueCreate(32, sizeof(rain_evt_t));
     if (!rain_gauge_evt_queue) {
         ESP_LOGE(RAIN_TAG, "Failed to create event queue");
         return;
     }
 
-    /* Create mutex to serialize Zigbee attribute updates from rain events */
-    rain_update_mutex = xSemaphoreCreateMutex();
-    if (rain_update_mutex == NULL) {
-        ESP_LOGW(RAIN_TAG, "Failed to create rain update mutex - concurrent updates not protected");
-    }
-
-    /* Create queue for Zigbee updates to decouple from ISR task */
-    zigbee_update_queue = xQueueCreate(32, sizeof(zigbee_update_evt_t));
-    if (!zigbee_update_queue) {
-        ESP_LOGE(RAIN_TAG, "Failed to create Zigbee update queue");
-        return;
-    }
-
-    /* Create task to handle Zigbee updates asynchronously */
-    BaseType_t zigbee_task_ret = xTaskCreate(zigbee_update_task, "zigbee_update_task", 4096, NULL, 5, &zigbee_update_task_handle);
-    if (zigbee_task_ret != pdPASS) {
-        ESP_LOGE(RAIN_TAG, "Failed to create Zigbee update task");
+    /* Create timer used to flush accumulated pulses */
+    const esp_timer_create_args_t flush_timer_args = {
+        .callback = rain_flush_timer_callback,
+        .name = "rain_flush"
+    };
+    if (esp_timer_create(&flush_timer_args, &rain_flush_timer) != ESP_OK) {
+        ESP_LOGE(RAIN_TAG, "Failed to create rain flush timer");
         return;
     }
     
