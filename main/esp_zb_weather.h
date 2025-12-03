@@ -22,7 +22,8 @@
 #define HA_ESP_BME280_ENDPOINT          1                                    /* esp BME280 environmental sensor endpoint */
 #define HA_ESP_RAIN_GAUGE_ENDPOINT      2                                    /* esp rain gauge sensor endpoint */
 #define HA_ESP_PULSE_COUNTER_ENDPOINT   3                                    /* esp pulse counter sensor endpoint (GPIO13) */
-/* Endpoint 4 (Sleep Configuration) removed - light sleep mode uses standard Zigbee reporting */
+#define HA_ESP_DS18B20_ENDPOINT         4                                    /* esp DS18B20 temperature sensor endpoint (GPIO24) */
+/* Endpoint 5 (Sleep Configuration) removed - light sleep mode uses standard Zigbee reporting */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK /* Zigbee primary channel mask use in the example */
 
 /* Debug LED configuration */
@@ -35,6 +36,7 @@
 #define SLEEP_DURATION_S                (SLEEP_DURATION_MINUTES * 60)
 #define RAIN_WAKE_GPIO                  GPIO_NUM_12                          /* GPIO for rain gauge wake-up */
 #define PULSE_WAKE_GPIO                 GPIO_NUM_13                          /* GPIO for pulse counter wake-up */
+#define DS18B20_GPIO                    GPIO_NUM_24                          /* GPIO for DS18B20 1-Wire temperature sensor */
 #define RAIN_MM_THRESHOLD               1.0f                                 /* Wake up immediately if rain > 1mm */
 
 /* Basic manufacturer information - now using CMakeLists.txt definitions */

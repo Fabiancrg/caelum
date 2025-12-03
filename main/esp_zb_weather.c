@@ -36,6 +36,8 @@
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_rom_uart.h"
+#include "driver/rmt_tx.h"
+#include "driver/rmt_rx.h"
 /* Generated header with FW_VERSION / FW_DATE_CODE - created at configure time */
 #include "version.h"
 
@@ -232,6 +234,11 @@ static bool pulse_counter_enabled = false;  // Only enable when connected to net
 static bool pulse_counter_isr_installed = false;  // Track ISR installation state
 static esp_timer_handle_t pulse_flush_timer = NULL;
 
+/* DS18B20 temperature sensor (GPIO24) */
+static const char *DS18B20_TAG = "DS18B20";
+static float ds18b20_last_temp = 0.0f;
+static bool ds18b20_available = false;
+
 /* Periodic sensor reading interval (5 minutes as per requirements) */
 #define PERIODIC_READING_INTERVAL_MS (5 * 60 * 1000ULL)  // 5 minutes in milliseconds
 #define RAIN_PULSE_FLUSH_THRESHOLD   10U
@@ -268,6 +275,8 @@ static void pulse_counter_request_flush(bool force_nvs, bool force_attribute);
 static void pulse_counter_flush_totals(bool save_to_nvs, bool update_attribute);
 static void pulse_counter_enable_isr(void);
 static void pulse_counter_disable_isr(void);
+static void ds18b20_init(void);
+static void ds18b20_read_and_report(uint8_t param);
 static esp_err_t battery_adc_init(void);
 static void battery_read_and_report(uint8_t param);
 static esp_err_t deferred_driver_init(void)
@@ -314,6 +323,9 @@ static esp_err_t deferred_driver_init(void)
     
     /* Initialize pulse counter (GPIO13) */
     pulse_counter_init();
+    
+    /* Initialize DS18B20 temperature sensor (GPIO24) */
+    ds18b20_init();
     
     /* Initialize battery ADC */
     ret = battery_adc_init();
@@ -555,7 +567,11 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             } else if (report_attr_message->cluster == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT) {
                 int16_t temp_raw = report_attr_message->attribute.data.value ? 
                                  *(int16_t*)report_attr_message->attribute.data.value : 0;
-                ESP_LOGI(TAG, "📡 Temp: %.1f°C", temp_raw / 100.0f);
+                if (report_attr_message->src_endpoint == HA_ESP_BME280_ENDPOINT) {
+                    ESP_LOGI(TAG, "📡 BME280 Temp: %.1f°C", temp_raw / 100.0f);
+                } else if (report_attr_message->src_endpoint == HA_ESP_DS18B20_ENDPOINT) {
+                    ESP_LOGI(TAG, "📡 DS18B20 Temp: %.1f°C", temp_raw / 100.0f);
+                }
             } else if (report_attr_message->cluster == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT) {
                 uint16_t hum_raw = report_attr_message->attribute.data.value ? 
                                  *(uint16_t*)report_attr_message->attribute.data.value : 0;
@@ -887,6 +903,30 @@ static void esp_zb_task(void *pvParameters)
     };
     esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_pulse_clusters, endpoint_pulse_config);
 
+    /* Create DS18B20 temperature sensor endpoint (GPIO24) */
+    esp_zb_cluster_list_t *esp_zb_ds18b20_clusters = esp_zb_zcl_cluster_list_create();
+    
+    /* Create Temperature Measurement cluster for DS18B20 with REPORTING flag */
+    esp_zb_temperature_meas_cluster_cfg_t ds18b20_temp_cfg = {
+        .measured_value = (int16_t)(ds18b20_last_temp * 100),  // Initialize with last known value
+        .min_value = -5000,     // -50°C
+        .max_value = 12500      // 125°C
+    };
+    esp_zb_attribute_list_t *esp_zb_ds18b20_temperature_cluster = esp_zb_temperature_meas_cluster_create(&ds18b20_temp_cfg);
+    
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_temperature_meas_cluster(esp_zb_ds18b20_clusters, esp_zb_ds18b20_temperature_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    
+    /* Add Identify cluster for DS18B20 endpoint */
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(esp_zb_ds18b20_clusters, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    
+    esp_zb_endpoint_config_t endpoint_ds18b20_config = {
+        .endpoint = HA_ESP_DS18B20_ENDPOINT,
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id = ESP_ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,
+        .app_device_version = 0
+    };
+    esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_ds18b20_clusters, endpoint_ds18b20_config);
+
     /* Endpoint 4 (Sleep Configuration) removed in light sleep mode.
      * Device uses automatic sleep/wake with standard Zigbee reporting configuration.
      * Reporting intervals controlled by coordinator via configureReporting commands.
@@ -953,6 +993,14 @@ static void esp_zb_task(void *pvParameters)
                                      ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID);
     if (attr) {
         ESP_LOGI(TAG, "  Pulse counter: access=0x%02x %s", attr->access,
+                 (attr->access & ESP_ZB_ZCL_ATTR_ACCESS_REPORTING) ? "✅ REPORTING" : "❌ NO REPORTING");
+    }
+    
+    // Check DS18B20 temperature
+    attr = esp_zb_zcl_get_attribute(HA_ESP_DS18B20_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID);
+    if (attr) {
+        ESP_LOGI(TAG, "  DS18B20 temp: access=0x%02x %s", attr->access,
                  (attr->access & ESP_ZB_ZCL_ATTR_ACCESS_REPORTING) ? "✅ REPORTING" : "❌ NO REPORTING");
     }
     
@@ -1114,6 +1162,7 @@ static void periodic_sensor_report_callback(void *arg)
          * The Zigbee stack will automatically send reports based on the coordinator's
          * reporting configuration (min/max intervals, reportable change thresholds). */
         esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 100);
+        esp_zb_scheduler_alarm((esp_zb_callback_t)ds18b20_read_and_report, 0, 150);
         rain_gauge_request_flush(false, true);
         pulse_counter_request_flush(false, true);
         /* Battery is read hourly based on its own time tracking */
@@ -2178,3 +2227,196 @@ static void pulse_counter_init(void)
              PULSE_COUNTER_GPIO, gpio_get_level(PULSE_COUNTER_GPIO));
     ESP_LOGI(PULSE_TAG, "Pulse counter ready - initial report will occur after network connection");
 }
+
+/********************* DS18B20 Temperature Sensor Functions **************************/
+
+/* DS18B20 1-Wire Commands */
+#define DS18B20_CMD_SKIP_ROM        0xCC
+#define DS18B20_CMD_CONVERT_T       0x44
+#define DS18B20_CMD_READ_SCRATCHPAD 0xBE
+
+/**
+ * @brief 1-Wire reset pulse - pull bus low for 480us, wait for presence pulse
+ * @return true if device present, false otherwise
+ */
+static bool ds18b20_reset(void)
+{
+    gpio_set_direction(DS18B20_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DS18B20_GPIO, 0);
+    esp_rom_delay_us(480);  // Reset pulse (480-960us)
+    
+    gpio_set_direction(DS18B20_GPIO, GPIO_MODE_INPUT);
+    esp_rom_delay_us(70);   // Wait for presence pulse (60-240us)
+    
+    int level = gpio_get_level(DS18B20_GPIO);
+    esp_rom_delay_us(410);  // Complete reset cycle
+    
+    return (level == 0);  // Device pulls line low if present
+}
+
+/**
+ * @brief Write a bit on 1-Wire bus
+ */
+static void ds18b20_write_bit(uint8_t bit)
+{
+    gpio_set_direction(DS18B20_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DS18B20_GPIO, 0);
+    
+    if (bit) {
+        esp_rom_delay_us(6);   // Write 1: short low pulse
+        gpio_set_level(DS18B20_GPIO, 1);
+        esp_rom_delay_us(64);
+    } else {
+        esp_rom_delay_us(60);  // Write 0: long low pulse
+        gpio_set_level(DS18B20_GPIO, 1);
+        esp_rom_delay_us(10);
+    }
+}
+
+/**
+ * @brief Read a bit from 1-Wire bus
+ */
+static uint8_t ds18b20_read_bit(void)
+{
+    gpio_set_direction(DS18B20_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DS18B20_GPIO, 0);
+    esp_rom_delay_us(3);
+    
+    gpio_set_direction(DS18B20_GPIO, GPIO_MODE_INPUT);
+    esp_rom_delay_us(10);
+    
+    uint8_t bit = gpio_get_level(DS18B20_GPIO);
+    esp_rom_delay_us(53);
+    
+    return bit;
+}
+
+/**
+ * @brief Write a byte on 1-Wire bus (LSB first)
+ */
+static void ds18b20_write_byte(uint8_t byte)
+{
+    for (int i = 0; i < 8; i++) {
+        ds18b20_write_bit(byte & 0x01);
+        byte >>= 1;
+    }
+}
+
+/**
+ * @brief Read a byte from 1-Wire bus (LSB first)
+ */
+static uint8_t ds18b20_read_byte(void)
+{
+    uint8_t byte = 0;
+    for (int i = 0; i < 8; i++) {
+        byte >>= 1;
+        if (ds18b20_read_bit()) {
+            byte |= 0x80;
+        }
+    }
+    return byte;
+}
+
+/**
+ * @brief Initialize DS18B20 temperature sensor on 1-Wire bus
+ * 
+ * Configures GPIO24 for 1-Wire communication and verifies DS18B20 presence.
+ * If sensor is not detected, logs warning and continues (allows device to work without DS18B20).
+ */
+static void ds18b20_init(void)
+{
+    ESP_LOGI(DS18B20_TAG, "Initializing DS18B20 on GPIO%d...", DS18B20_GPIO);
+    
+    /* Configure GPIO as open-drain with pull-up (1-Wire requires pull-up) */
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << DS18B20_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    
+    /* Test presence of DS18B20 */
+    vTaskDelay(pdMS_TO_TICKS(10));  // Allow bus to stabilize
+    
+    if (ds18b20_reset()) {
+        ds18b20_available = true;
+        ESP_LOGI(DS18B20_TAG, "✅ DS18B20 detected on GPIO%d", DS18B20_GPIO);
+    } else {
+        ds18b20_available = false;
+        ESP_LOGW(DS18B20_TAG, "⚠️ No DS18B20 detected on GPIO%d - sensor disabled", DS18B20_GPIO);
+    }
+}
+
+/**
+ * @brief Read DS18B20 temperature and update Zigbee attribute
+ * 
+ * @param param Unused parameter (required for esp_zb_scheduler_alarm callback)
+ * 
+ * Reads temperature from DS18B20 sensor and updates Temperature Measurement cluster
+ * attribute on endpoint 4. Logs warning if sensor is not available.
+ */
+static void ds18b20_read_and_report(uint8_t param)
+{
+    (void)param;  // Unused
+    
+    /* Check if DS18B20 is available */
+    if (!ds18b20_available) {
+        ESP_LOGD(DS18B20_TAG, "DS18B20 not available - skipping read");
+        return;
+    }
+    
+    /* Reset and check presence */
+    if (!ds18b20_reset()) {
+        ESP_LOGW(DS18B20_TAG, "DS18B20 not responding");
+        return;
+    }
+    
+    /* Start temperature conversion */
+    ds18b20_write_byte(DS18B20_CMD_SKIP_ROM);  // Skip ROM (single device)
+    ds18b20_write_byte(DS18B20_CMD_CONVERT_T);  // Convert T command
+    
+    /* Wait for conversion (750ms for 12-bit resolution) */
+    vTaskDelay(pdMS_TO_TICKS(800));
+    
+    /* Read scratchpad */
+    if (!ds18b20_reset()) {
+        ESP_LOGW(DS18B20_TAG, "DS18B20 not responding after conversion");
+        return;
+    }
+    
+    ds18b20_write_byte(DS18B20_CMD_SKIP_ROM);
+    ds18b20_write_byte(DS18B20_CMD_READ_SCRATCHPAD);
+    
+    /* Read temperature bytes (LSB first) */
+    uint8_t temp_lsb = ds18b20_read_byte();
+    uint8_t temp_msb = ds18b20_read_byte();
+    
+    /* Convert to temperature (12-bit resolution: 0.0625°C per bit) */
+    int16_t raw_temp = (temp_msb << 8) | temp_lsb;
+    float temperature = (float)raw_temp * 0.0625f;
+    
+    /* Basic sanity check (-55°C to 125°C is DS18B20 range) */
+    if (temperature < -55.0f || temperature > 125.0f) {
+        ESP_LOGW(DS18B20_TAG, "Invalid temperature reading: %.2f°C", temperature);
+        return;
+    }
+    
+    /* Update last known temperature */
+    ds18b20_last_temp = temperature;
+    
+    /* Convert to Zigbee format (0.01°C units) */
+    int16_t temp_centidegrees = (int16_t)(temperature * 100);
+    
+    /* Update Zigbee attribute (false = don't force report, let coordinator config decide) */
+    esp_err_t ret = esp_zb_zcl_set_attribute_val(HA_ESP_DS18B20_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+                                                  ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+                                                  &temp_centidegrees, false);
+    if (ret == ESP_OK) {
+        ESP_LOGI(DS18B20_TAG, "🌡️ DS18B20 Temperature: %.2f°C (attribute updated)", temperature);
+    } else {
+        ESP_LOGE(DS18B20_TAG, "Failed to update temperature attribute: %s", esp_err_to_name(ret));
+    }
+}
+
