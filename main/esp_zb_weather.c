@@ -377,6 +377,136 @@ static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
     ESP_RETURN_ON_FALSE(esp_zb_bdb_start_top_level_commissioning(mode_mask) == ESP_OK, , TAG, "Failed to start Zigbee commissioning");
 }
 
+/**
+ * @brief Configure local reporting for analog input endpoints (EP2 and EP3)
+ * 
+ * This function sets up local reporting configuration for the rain gauge (EP2)
+ * and pulse counter (EP3) analog input clusters. The Zigbee stack will then
+ * automatically send reports when the attribute value changes by the specified
+ * amount (reportable_change).
+ * 
+ * This is necessary because:
+ * 1. Z2M's Configure Reporting command may not persist across device reboots
+ * 2. For SEDs, the stack needs explicit local configuration to trigger reports
+ * 3. Analog Input clusters with float values need proper reportable_change setup
+ *
+ * @brief Callback for bind request completion
+ */
+static void bind_req_cb(esp_zb_zdp_status_t zdo_status, void *user_ctx)
+{
+    const char *endpoint_name = (const char *)user_ctx;
+    if (zdo_status == ESP_ZB_ZDP_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "✅ Binding created for %s analog input cluster", endpoint_name);
+    } else {
+        ESP_LOGW(TAG, "⚠️ Binding failed for %s: status=0x%02x (may already exist)", endpoint_name, zdo_status);
+    }
+}
+
+/**
+ * @brief Configure local reporting for analog input endpoints (EP2 and EP3)
+ * 
+ * This function sets up:
+ * 1. Bindings to the coordinator for each analog input endpoint
+ * 2. Local reporting configuration with min/max intervals and reportable change
+ * 
+ * This is necessary because:
+ * 1. Z2M's Configure Reporting command may not persist across device reboots
+ * 2. For SEDs, the stack needs explicit local configuration to trigger reports
+ * 3. Analog Input clusters with float values need proper reportable_change setup
+ */
+static void configure_analog_input_reporting(uint8_t param)
+{
+    (void)param;  // Unused
+    
+    ESP_LOGI(TAG, "📋 Configuring bindings and reporting for analog input endpoints");
+    
+    /* First, create bindings to the coordinator (0x0000) for each endpoint
+     * This tells the Zigbee stack where to send reports */
+    esp_zb_ieee_addr_t coordinator_ieee;
+    esp_zb_ieee_address_by_short(0x0000, coordinator_ieee);  // Get coordinator's IEEE address
+    
+    esp_zb_ieee_addr_t our_ieee;
+    esp_zb_get_long_address(our_ieee);
+    
+    /* Create binding for EP2 (rain gauge) */
+    esp_zb_zdo_bind_req_param_t rain_bind_req = {0};
+    rain_bind_req.req_dst_addr = esp_zb_get_short_address();  // Send bind request to ourselves
+    memcpy(rain_bind_req.src_address, our_ieee, sizeof(esp_zb_ieee_addr_t));
+    rain_bind_req.src_endp = HA_ESP_RAIN_GAUGE_ENDPOINT;
+    rain_bind_req.cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
+    rain_bind_req.dst_addr_mode = ESP_ZB_ZDO_BIND_DST_ADDR_MODE_64_BIT_EXTENDED;
+    memcpy(rain_bind_req.dst_address_u.addr_long, coordinator_ieee, sizeof(esp_zb_ieee_addr_t));
+    rain_bind_req.dst_endp = 1;  // Coordinator endpoint
+    
+    esp_zb_zdo_device_bind_req(&rain_bind_req, bind_req_cb, (void*)"rain gauge");
+    
+    /* Create binding for EP3 (pulse counter) */
+    esp_zb_zdo_bind_req_param_t pulse_bind_req = {0};
+    pulse_bind_req.req_dst_addr = esp_zb_get_short_address();  // Send bind request to ourselves
+    memcpy(pulse_bind_req.src_address, our_ieee, sizeof(esp_zb_ieee_addr_t));
+    pulse_bind_req.src_endp = HA_ESP_PULSE_COUNTER_ENDPOINT;
+    pulse_bind_req.cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
+    pulse_bind_req.dst_addr_mode = ESP_ZB_ZDO_BIND_DST_ADDR_MODE_64_BIT_EXTENDED;
+    memcpy(pulse_bind_req.dst_address_u.addr_long, coordinator_ieee, sizeof(esp_zb_ieee_addr_t));
+    pulse_bind_req.dst_endp = 1;  // Coordinator endpoint
+    
+    esp_zb_zdo_device_bind_req(&pulse_bind_req, bind_req_cb, (void*)"pulse counter");
+    
+    /* Reportable change threshold for float values */
+    float rain_reportable_change = 0.3f;    // Report when rain changes by 0.3mm 
+    float pulse_reportable_change = 1.0f;   // Report when pulse count changes by 1
+    
+    /* Configure reporting for EP2 (rain gauge) */
+    esp_zb_zcl_config_report_cmd_t rain_report_cmd = {0};
+    rain_report_cmd.zcl_basic_cmd.dst_addr_u.addr_short = esp_zb_get_short_address();  // Send to self
+    rain_report_cmd.zcl_basic_cmd.dst_endpoint = HA_ESP_RAIN_GAUGE_ENDPOINT;
+    rain_report_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_RAIN_GAUGE_ENDPOINT;
+    rain_report_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+    rain_report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
+    
+    esp_zb_zcl_config_report_record_t rain_record = {
+        .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+        .attrType = ESP_ZB_ZCL_ATTR_TYPE_SINGLE,  // Float type
+        .min_interval = 0,      // No minimum interval - report immediately on change
+        .max_interval = 3600,   // Report at least every hour even if no change
+        .reportable_change = &rain_reportable_change,
+    };
+    rain_report_cmd.record_number = 1;
+    rain_report_cmd.record_field = &rain_record;
+    
+    esp_zb_lock_acquire(portMAX_DELAY);
+    esp_zb_zcl_config_report_cmd_req(&rain_report_cmd);
+    esp_zb_lock_release();
+    
+    ESP_LOGI(RAIN_TAG, "📋 Rain gauge reporting configured: change=%.1f mm, max_interval=3600s", rain_reportable_change);
+    
+    /* Configure reporting for EP3 (pulse counter) */
+    esp_zb_zcl_config_report_cmd_t pulse_report_cmd = {0};
+    pulse_report_cmd.zcl_basic_cmd.dst_addr_u.addr_short = esp_zb_get_short_address();  // Send to self
+    pulse_report_cmd.zcl_basic_cmd.dst_endpoint = HA_ESP_PULSE_COUNTER_ENDPOINT;
+    pulse_report_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_PULSE_COUNTER_ENDPOINT;
+    pulse_report_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+    pulse_report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT;
+    
+    esp_zb_zcl_config_report_record_t pulse_record = {
+        .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .attributeID = ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+        .attrType = ESP_ZB_ZCL_ATTR_TYPE_SINGLE,  // Float type
+        .min_interval = 0,      // No minimum interval - report immediately on change
+        .max_interval = 3600,   // Report at least every hour even if no change
+        .reportable_change = &pulse_reportable_change,
+    };
+    pulse_report_cmd.record_number = 1;
+    pulse_report_cmd.record_field = &pulse_record;
+    
+    esp_zb_lock_acquire(portMAX_DELAY);
+    esp_zb_zcl_config_report_cmd_req(&pulse_report_cmd);
+    esp_zb_lock_release();
+    
+    ESP_LOGI(PULSE_TAG, "📋 Pulse counter reporting configured: change=%.1f, max_interval=3600s", pulse_reportable_change);
+}
+
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
     uint32_t *p_sg_p       = signal_struct->p_app_signal;
@@ -453,10 +583,14 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             pulse_counter_enable_isr();
             ESP_LOGI(PULSE_TAG, "Pulse counter enabled - device connected to Zigbee network");
             
+            /* Configure local reporting for analog input endpoints (EP2 and EP3)
+             * This ensures the Zigbee stack knows to send reports when values change,
+             * regardless of whether Z2M has sent a Configure Reporting command. */
+            esp_zb_scheduler_alarm((esp_zb_callback_t)configure_analog_input_reporting, 0, 1000); // Configure in 1 second
+            
             /* Schedule sensor data reporting after first connection 
              * Update attributes (but don't force reports) so coordinator can read current values.
-             * Actual reports will be sent based on coordinator's reporting configuration.
-             * After reboot, reporting config is lost and must be reconfigured by coordinator. */
+             * Actual reports will be sent based on local and coordinator's reporting configuration. */
             ESP_LOGI(TAG, "📊 Scheduling initial sensor data updates after network join");
             esp_zb_scheduler_alarm((esp_zb_callback_t)bme280_read_and_report, 0, 2000); // Update in 2 seconds
             // Queue rain gauge flush to publish current total after network join
@@ -555,7 +689,34 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
     ESP_LOGI(TAG, "Received message: endpoint(%d), cluster(0x%x), attribute(0x%x), data size(%d)", message->info.dst_endpoint, message->info.cluster,
              message->attribute.id, message->attribute.data.size);
     
-    /* No custom attribute handling needed - all attributes managed by standard Zigbee reporting */
+    /* Handle writes to Analog Input clusters (EP2 rain gauge, EP3 pulse counter)
+     * This allows Z2M to reset the counter values */
+    if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT &&
+        message->attribute.id == ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID) {
+        
+        float new_value = message->attribute.data.value ? *(float*)message->attribute.data.value : 0.0f;
+        
+        if (message->info.dst_endpoint == HA_ESP_RAIN_GAUGE_ENDPOINT) {
+            /* Reset rain gauge counter */
+            ESP_LOGI(RAIN_TAG, "🔄 Rain gauge reset from Z2M: %.2f mm -> %.2f mm", total_rainfall_mm, new_value);
+            total_rainfall_mm = new_value;
+            rain_pulse_count = (uint32_t)(new_value / RAIN_MM_PER_PULSE);  // Recalculate pulse count
+            
+            /* Save to NVS immediately */
+            save_rainfall_data(total_rainfall_mm, rain_pulse_count);
+            ESP_LOGI(RAIN_TAG, "💾 Rain gauge value saved to NVS: %.2f mm (%lu pulses)", total_rainfall_mm, rain_pulse_count);
+            
+        } else if (message->info.dst_endpoint == HA_ESP_PULSE_COUNTER_ENDPOINT) {
+            /* Reset pulse counter */
+            ESP_LOGI(PULSE_TAG, "🔄 Pulse counter reset from Z2M: %.2f -> %.2f", total_pulse_count_value, new_value);
+            total_pulse_count_value = new_value;
+            pulse_counter_count = (uint32_t)new_value;  // Update pulse count
+            
+            /* Save to NVS immediately */
+            save_pulse_counter_data(total_pulse_count_value, pulse_counter_count);
+            ESP_LOGI(PULSE_TAG, "💾 Pulse counter value saved to NVS: %.2f (%lu pulses)", total_pulse_count_value, pulse_counter_count);
+        }
+    }
     
     return ret;
 }
@@ -881,7 +1042,7 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_attribute_list_t *esp_zb_rain_analog_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT);
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(esp_zb_rain_analog_cluster, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
                                             ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_SINGLE,
-                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &rain_present_value));
+                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &rain_present_value));
     
     /* Add description attribute */
     char rain_description[] = "\x0E""Rainfall Total";  // Length-prefixed: 14 bytes + "Rainfall Total"
@@ -918,7 +1079,7 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_attribute_list_t *esp_zb_pulse_analog_cluster = esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT);
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(esp_zb_pulse_analog_cluster, ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
                                             ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID, ESP_ZB_ZCL_ATTR_TYPE_SINGLE,
-                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &pulse_present_value));
+                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &pulse_present_value));
     
     /* Add description attribute */
     char pulse_description[] = "\x0D""Pulse Counter";  // Length-prefixed: 13 bytes + "Pulse Counter"

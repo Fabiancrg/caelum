@@ -40,7 +40,7 @@ export default {
                 description: "Total rainfall",
                 unit: "mm",
                 precision: 1,
-                access: "STATE_GET",
+                access: "ALL",
                 icon: "mdi:weather-rainy",
                 exposesName: "Rain amount"
             }
@@ -54,7 +54,7 @@ export default {
                 attribute: "presentValue",
                 reporting: {"min":0,"max":3600,"change":1},
                 description: "Pulse count",
-                access: "STATE_GET",
+                access: "ALL",
                 exposesName: "Pulse Count"
             }
         ),
