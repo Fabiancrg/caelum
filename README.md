@@ -1,6 +1,6 @@
 hy [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)
 
-| Supported Targets | ESP32-C6 | ESP32-H2 |
+| Supported Targets | ESP32-H2 (v2.0) | ESP32-C6 (v1.0 legacy) |
 | ----------------- |  -------- | -------- |
 
 # Caelum - Zigbee Weather Station
@@ -10,7 +10,9 @@ hy [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://k
 
 ## Project Description
 
-This project implements a battery-powered environmental monitoring device using ESP32-C6/H2 with Zigbee connectivity. The device operates as a Zigbee Sleepy End Device (SED) with automatic light sleep for ultra-low power consumption while maintaining network responsiveness. Features a 3-endpoint design with WS2812 RGB LED boot indicator and optimized power management achieving 0.68mA sleep current.
+This project implements a battery-powered comprehensive weather station using ESP32-H2 with Zigbee connectivity. The device operates as a Zigbee Sleepy End Device (SED) with automatic light sleep for ultra-low power consumption while maintaining network responsiveness.
+
+**Hardware v2.0** features dual I2C buses supporting multiple sensor combinations, dedicated rain gauge and anemometer inputs, DS18B20 temperature sensor, light sensor, and wind direction sensor for professional weather monitoring capabilities.
 
 This project is based on the examples provided in the ESP Zigbee SDK:
 
@@ -19,14 +21,16 @@ This project is based on the examples provided in the ESP Zigbee SDK:
 
 ## Device Features
 
-### 🌐 Zigbee Endpoints Overview
+### 🌐 Zigbee Endpoints Overview (v2.0 Hardware)
 
 | Endpoint | Device Type | Clusters | Description |
 |----------|-------------|----------|-------------|
-| **1** | Environmental Sensor | Temperature, Humidity, Pressure, Battery, OTA | BME280 sensor via I2C |
-| **2** | Rain Gauge | Analog Input | Tipping bucket rain sensor with rainfall totals |
-| **3** | Sleep Configuration | Analog Input | Remote sleep duration control (60-7200 seconds) |
-| **4 (removed)** | LED Debug Control | On/Off | ⚠️ **LED now always active during boot/join only** - shows network status (yellow blink → blue success / red failure), then powers down permanently to save battery |
+| **1** | Environmental Sensor | Temperature, Humidity, Pressure, Battery, OTA | Multi-sensor support via dual I2C buses |
+| **2** | Rain Gauge | Analog Input | Tipping bucket rain sensor with rainfall totals (GPIO12) |
+| **3** | DS18B20 Temperature | Temperature Measurement | External waterproof temperature probe (GPIO24) |
+| **4** | Anemometer (Wind Speed) | Analog Input | Wind speed sensor with pulse counting (GPIO14) |
+| **5** | Wind Direction | Analog Input | AS5600 magnetic wind vane (I2C Bus 2) |
+| **6** | Light Sensor | Illuminance Measurement | VEML7700 ambient light sensor (I2C Bus 2) |
 
 ### 💡 LED Boot Indicator (Always Active)
 
@@ -38,43 +42,37 @@ The device includes a WS2812 RGB LED on GPIO8 (ESP32-H2) that provides visual fe
 
 **Power Optimization**: The LED and its RMT peripheral are permanently disabled after the initial boot/join sequence to save ~1-2mA. This is critical for achieving 0.68mA sleep current. The LED cannot be re-enabled remotely - it only operates during the first boot cycle.
 
-### 📋 Detailed Endpoint Descriptions
+### 📋 Detailed Endpoint Descriptions (v2.0)
 
 #### **Endpoint 1: Environmental Monitoring & Power Management**
-- **Hardware**: Environmental sensors via I2C (auto-detection)
-  - **ESP32-H2**: SDA: GPIO10, SCL: GPIO11
-  - **ESP32-C6**: SDA: GPIO6, SCL: GPIO7
+- **Hardware**: Dual I2C bus architecture for sensor flexibility
+  - **I2C Bus 1 (GPIO10/11)**: Temperature, Humidity, Pressure sensors
+  - **I2C Bus 2 (GPIO1/2)**: Wind direction, Light, Alternative pressure sensors
 - **Supported Sensors** (automatically detected):
-  - **BME280**: Temperature + Humidity + Pressure (all-in-one sensor)
-  - **BMP280**: Temperature + Pressure only (no humidity sensor)
-  - **SHT40/SHT41**: High-accuracy Temperature + Humidity (no pressure)
-  - **SHT41 + BMP280**: Combined setup (temp/humidity from SHT41, pressure from BMP280)
-  - **AHT20 + BMP280**: Alternative combo (temp/humidity from AHT20, pressure from BMP280)
+  - **SHT41** (Bus 1): High-accuracy Temperature + Humidity (±0.2°C, ±1.8% RH)
+  - **AHT20** (Bus 1): Alternative Temperature + Humidity sensor
+  - **BMP280** (Bus 1): Temperature + Pressure (±1 hPa accuracy)
+  - **BME280** (Bus 1): All-in-one Temperature + Humidity + Pressure
+  - **DPS368** (Bus 2): High-precision Pressure sensor (±0.002 hPa)
+  - **AS5600** (Bus 2): Magnetic wind direction sensor (12-bit resolution)
+  - **VEML7700** (Bus 2): Ambient light sensor (0.0036 to 120,000 lux)
 - **Measurements**: 
-  - 🌡️ **Temperature**: -40°C to +85°C (±0.2°C accuracy with SHT40, ±1°C with BME280/BMP280)
-  - 💧 **Humidity**: 0-100% RH (±1.8% accuracy with SHT40, ±3% with BME280, unavailable with BMP280 alone) 
-  - 🌪️ **Pressure**: 300-1100 hPa (±1 hPa accuracy with BME280/BMP280, default 1000 hPa with SHT40 alone)
+  - 🌡️ **Temperature**: -40°C to +85°C (multiple sources available)
+  - 💧 **Humidity**: 0-100% RH (from SHT41/AHT20/BME280)
+  - 🌪️ **Pressure**: 300-1100 hPa (from BMP280/BME280/DPS368)
   - 🔋 **Battery Monitoring**: Li-Ion voltage (2.7V-4.2V) and percentage
-- **Sensor Detection**: Automatic chip ID detection distinguishes BME280 (0x60) from BMP280 (0x58)
-  - BMP280 detected → searches for SHT40/41 for humidity readings
-  - Optimal combo: SHT40 (accurate temp/humidity) + BMP280 (pressure)
 - **Battery Monitoring**:
   - **Hardware**: GPIO4 (ADC1_CH4) with voltage divider (2x 100kΩ resistors)
+  - **MOSFET Control**: GPIO3 for active power management
   - **Voltage**: Real-time battery voltage in 0.1V units
   - **Percentage**: Battery level 0-100% based on Li-Ion discharge curve
   - **Calibration**: ESP32-H2 ADC correction factor (1.604x) for accurate readings
-  - **Power Configuration Cluster**: Standard Zigbee battery attributes
-  - **Optimized Reading**: 
-    - Time-based hourly intervals (3600 seconds) with NVS persistence
-    - 3 ADC samples for accurate readings with minimal power use
-    - Always reports on first boot/pairing, then hourly regardless of wake frequency
-- **Features**: Automatic reporting via Zigbee attribute updates, Zigbee-standard units
-- **Use Case**: Weather monitoring, HVAC automation, air quality tracking, battery-powered applications
+  - **Optimized Reading**: Time-based hourly intervals with NVS persistence
+- **Use Case**: Comprehensive weather monitoring, HVAC automation, solar power tracking
 
 #### **Endpoint 2: Rain Gauge System**
 - **Hardware**: Tipping bucket rain gauge with reed switch
-  - **ESP32-H2**: GPIO12 (interrupt-capable)
-  - **ESP32-C6**: GPIO5 (interrupt-capable)
+  - **ESP32-H2 v2.0**: GPIO12 (interrupt-capable, dedicated rain input)
 - **Measurements**: Cumulative rainfall in millimeters (0.36mm per tip)
 - **Features**: 
   - Interrupt-based detection (200ms debounce)
@@ -86,72 +84,146 @@ The device includes a WS2812 RGB LED on GPIO8 (ESP32-H2) that provides visual fe
   - Maximum rate: 200mm/hour supported
   - Accuracy: ±0.36mm per bucket tip
   - Storage: Non-volatile total persistence across reboots
-  - Power: Minimal impact - GPIO interrupt wakes from light sleep
 - **Use Case**: Weather station, irrigation control, flood monitoring
 
-#### **Endpoint 3: Sleep Configuration**
-- **Hardware**: Software-only (virtual endpoint)
-- **Control**: Sleep duration in seconds (60-7200s range)
+#### **Endpoint 3: DS18B20 External Temperature Sensor**
+- **Hardware**: DS18B20 1-Wire waterproof temperature probe
+  - **GPIO24**: 1-Wire bus with parasitic power support
+- **Measurements**: External temperature -55°C to +125°C (±0.5°C accuracy)
 - **Features**:
-  - Remote configuration via Zigbee2MQTT or Home Assistant
-  - Persistent storage (NVS) - survives reboots
-  - Real-time updates - changes apply immediately
-  - Default: 900 seconds (15 minutes)
-- **Note**: In light sleep mode (current implementation), this controls sensor reporting interval rather than actual sleep duration. Device maintains network connection and wakes every 7.5 seconds for keep-alive polling.
-- **Use Case**: 
-  - Battery optimization (longer intervals = less frequent sensor readings)
-  - Seasonal adjustments (frequent updates in rainy season)
-  - Dynamic reporting based on weather conditions
+  - Waterproof probe for outdoor/liquid temperature monitoring
+  - 12-bit resolution (0.0625°C precision)
+  - Independent from I2C environmental sensors
+  - Parasitic power mode (no external power needed)
+- **Use Case**: Soil temperature, water temperature, outdoor ambient temperature
 
-#### **Endpoint 4: LED Debug Control (Deprecated)**
-- **Status**: ⚠️ **No longer controllable** - LED now operates only during boot/join sequence
-- **Previous Function**: Remote LED control via Zigbee2MQTT
-- **Current Behavior**: LED automatically shows boot status (yellow → blue/red) then powers down permanently
-- **Reason**: RMT peripheral consumes 1-2mA continuously. Power-down is essential for 0.68mA sleep current.
-- **Migration**: Remove any automation/scripts that attempt to control LED endpoint
-- **Documentation**: See code comments in `esp_zb_weather.c` for LED implementation details
+#### **Endpoint 4: Anemometer (Wind Speed)**
+- **Hardware**: Pulse-output anemometer
+  - **GPIO14**: Interrupt-capable input for pulse counting
+- **Measurements**: Wind speed via pulse frequency
+- **Features**:
+  - Interrupt-based pulse counting with debounce
+  - Persistent storage (NVS) for total tracking
+  - Similar architecture to rain gauge (proven reliability)
+- **Use Case**: Weather station, HVAC control, drone operations
+
+#### **Endpoint 5: Wind Direction**
+- **Hardware**: AS5600 magnetic rotary position sensor (I2C Bus 2)
+  - **I2C Address**: 0x36 (fixed)
+  - **Resolution**: 12-bit (0.087° per step)
+- **Measurements**: Wind direction 0-360° (compass bearing)
+- **Features**:
+  - Contactless magnetic sensing (no wear)
+  - Absolute position (no homing required)
+  - High resolution for accurate wind vane reading
+- **Use Case**: Weather station, wind power monitoring, sailing applications
+
+#### **Endpoint 6: Light Sensor**
+- **Hardware**: VEML7700 ambient light sensor (I2C Bus 2)
+  - **I2C Address**: 0x10 (fixed)
+  - **Range**: 0.0036 to 120,000 lux
+- **Measurements**: Ambient light intensity in lux
+- **Features**:
+  - High dynamic range (16-bit resolution)
+  - Automatic gain adjustment
+  - Human eye response matching
+- **Use Case**: Solar panel monitoring, daylight harvesting, plant growth monitoring
 
 ### 🔧 Hardware Configuration
 
-#### **Required Components**
-- ESP32-C6 or ESP32-H2 development board
-- **Environmental Sensor** (one of the following):
-  - **BME280** - All-in-one temperature + humidity + pressure sensor
-  - **BMP280** - Temperature + pressure only (pair with SHT40/41 for humidity)
-  - **SHT40 or SHT41** - High-accuracy temperature + humidity (pair with BMP280 for pressure)
-  - **AHT20** - Temperature + humidity alternative (pair with BMP280 for pressure)
-- Tipping bucket rain gauge with reed switch
-- Li-Ion battery (with protection circuit, 5V output recommended)
-- Voltage divider (2x 100kΩ resistors for battery monitoring)
+#### **Required Components (v2.0 Hardware)**
+- ESP32-H2 development board (RISC-V architecture)
+- **I2C Bus 1 Sensors** (Temperature/Humidity/Pressure):
+  - **SHT41** - High-accuracy temperature + humidity (recommended)
+  - **AHT20** - Alternative temperature + humidity sensor
+  - **BMP280** - Pressure sensor (pairs with SHT41/AHT20)
+  - **BME280** - All-in-one temp/humidity/pressure (alternative)
+- **I2C Bus 2 Sensors** (Wind/Light/Pressure):
+  - **AS5600** - Magnetic rotary position sensor for wind direction
+  - **VEML7700** - Ambient light sensor (lux measurements)
+  - **DPS368** - High-precision barometric pressure sensor (optional, alternative to BMP280)
+- **1-Wire Sensor**:
+  - **DS18B20** - Waterproof temperature probe for external measurements
+- **Wind Sensors**:
+  - Tipping bucket rain gauge with reed switch (0.36mm per tip)
+  - Anemometer with pulse output for wind speed measurement
+- **Power System**:
+  - Li-Ion battery (with protection circuit, 5V output recommended)
+  - Voltage divider (2x 100kΩ resistors for battery monitoring)
+  - MOSFET for battery power management (GPIO3 control)
 - Zigbee coordinator (ESP32-H2 or commercial gateway)
 
-**Recommended Sensor Combinations**:
-- **Best accuracy**: SHT40 + BMP280 (temp/humidity from SHT40, pressure from BMP280)
-- **All-in-one**: BME280 (good all-around accuracy, single module)
-- **Budget**: BMP280 alone (temperature + pressure, no humidity)
+**Recommended v2.0 Configuration**:
+- **Best accuracy**: SHT41 + BMP280 (Bus 1) + AS5600 + VEML7700 (Bus 2) + DS18B20
+- **Weather station**: Full sensor array with wind speed, direction, rain, temperature, light
+- **Minimal**: SHT41 + BMP280 (Bus 1) + Rain gauge + DS18B20
 
 #### **Pin Assignments**
 
-**ESP32-H2 (Recommended)**
+**ESP32-H2 (v2.0 Hardware)**
 ```
+GPIO 1  - I2C Bus 2 SDA (AS5600 wind direction, VEML7700 light sensor, DPS368 pressure)
+GPIO 2  - I2C Bus 2 SCL (AS5600 wind direction, VEML7700 light sensor, DPS368 pressure)
+GPIO 3  - Battery MOSFET control (active power management)
 GPIO 4  - Battery voltage input (ADC1_CH4 with voltage divider)
 GPIO 8  - WS2812 RGB LED (debug indicator, optional)
 GPIO 9  - Built-in button (factory reset)
-GPIO 10 - I2C SDA (environmental sensors: BME280/BMP280/SHT40/SHT41/AHT20)
-GPIO 11 - I2C SCL (environmental sensors: BME280/BMP280/SHT40/SHT41/AHT20) 
-GPIO 12 - Rain gauge input (RTC-capable)*
+GPIO 10 - I2C Bus 1 SDA (SHT41/AHT20 temp/humidity, BMP280/BME280 pressure)
+GPIO 11 - I2C Bus 1 SCL (SHT41/AHT20 temp/humidity, BMP280/BME280 pressure)
+GPIO 12 - Rain gauge input (tipping bucket with reed switch)
+GPIO 14 - Anemometer input (wind speed pulse counter)
+GPIO 24 - DS18B20 1-Wire temperature sensor (waterproof probe)
 ```
 
-**ESP32-C6**
+**Note**: v2.0 uses dedicated dual I2C buses to avoid address conflicts and support expanded sensor array.
+
+**ESP32-C6 (v1.0 Hardware - Legacy)**
 ```
 GPIO 4  - Battery voltage input (ADC1_CH4 with voltage divider)
-GPIO 5  - Rain gauge input (RTC-capable)*
+GPIO 5  - Rain gauge input (RTC-capable)
 GPIO 6  - I2C SDA (environmental sensors: BME280/BMP280/SHT40/SHT41/AHT20)
 GPIO 7  - I2C SCL (environmental sensors: BME280/BMP280/SHT40/SHT41/AHT20) 
 GPIO 9  - Built-in button (factory reset)
 ```
+*Note: v1.0 hardware support maintained for backward compatibility. See caelum-weatherstation repository for v1.0 firmware.*eatherstation repository for v1.0 firmware.*
 
-*Both targets now use RTC-capable GPIO pins for rain detection during deep sleep
+### 🔧 Hardware Version History
+
+#### **v2.0 (Current - 2024)**
+**Target**: ESP32-H2 only  
+**Major Changes**:
+- ✅ **Dual I2C Buses**: Separate buses (GPIO10/11 and GPIO1/2) eliminate address conflicts
+- ✅ **Expanded Sensors**: DS18B20 (GPIO24), AS5600 wind direction, VEML7700 light, DPS368 pressure
+- ✅ **Dedicated Inputs**: Rain gauge (GPIO12), Anemometer (GPIO14)
+- ✅ **Battery Management**: MOSFET control (GPIO3) for active power management
+- ❌ **Removed**: Pulse counter (GPIO13) - replaced by dedicated rain gauge and anemometer
+- 📦 **Endpoints**: 6 total (ENV, RAIN, DS18B20, WIND_SPEED, WIND_DIR, LIGHT)
+
+**Pin Changes from v1.0**:
+```
+Added:
+  GPIO 1/2   - I2C Bus 2 (new sensors)
+  GPIO 3     - Battery MOSFET control  
+  GPIO 14    - Anemometer (wind speed)
+  GPIO 24    - DS18B20 temperature probe
+  
+Removed:
+  GPIO 13    - Pulse counter (v1.0 only)
+```
+
+#### **v1.0 (Legacy - 2023)**
+**Targets**: ESP32-H2, ESP32-C6  
+**Features**:
+- Single I2C bus (GPIO10/11 on H2, GPIO6/7 on C6)
+- BME280/BMP280/SHT41/AHT20 environmental sensors
+- Rain gauge (GPIO12 on H2, GPIO5 on C6)
+- Pulse counter (GPIO13) for general-purpose counting
+- 3 endpoints (ENV, RAIN, PULSE_COUNTER)
+
+**Migration Notes**:
+- v1.0 firmware available in `caelum-weatherstation` repository
+- v2.0 hardware NOT compatible with v1.0 firmware (different GPIO assignments)
+- v1.0 hardware CAN run v2.0 firmware with limited functionality (only ENV + RAIN endpoints)
 
 **Battery Voltage Divider Circuit**
 ```
@@ -255,21 +327,19 @@ Note: Voltage divider monitors the cell voltage (2.7V-4.2V) while the battery pa
 # Install ESP-IDF v5.5.1 or later
 git clone -b v5.5.1 --recursive https://github.com/espressif/esp-idf.git
 cd esp-idf
-# For ESP32-H2 (recommended)
+# For ESP32-H2 (v2.0 hardware required)
 ./install.sh esp32h2
-# For ESP32-C6
-./install.sh esp32c6
 . ./export.sh
 ```
 
 ### Configure the Project
 ```bash
-# For ESP32-H2 (recommended for better power management)
+# For ESP32-H2 v2.0 hardware
 idf.py set-target esp32h2
-# For ESP32-C6  
-idf.py set-target esp32c6
 idf.py menuconfig
 ```
+
+**Note**: v2.0 firmware requires v2.0 hardware (dual I2C buses, new GPIO assignments). For v1.0 hardware (ESP32-C6 or ESP32-H2 single I2C), use the `caelum-weatherstation` repository.
 
 ### Build and Flash
 ```bash
@@ -381,21 +451,112 @@ I (15010) WEATHER_STATION: 💤 Entering light sleep (will wake for 7.5s keep-al
 
 ## 🏠 Home Assistant Integration
 
-When connected to Zigbee2MQTT or other Zigbee coordinators, the device appears as:
+When connected to Zigbee2MQTT or other Zigbee coordinators, the v2.0 device exposes:
 
-- **4x Sensor entities**: Temperature, Humidity, Pressure, Battery Percentage
-- **1x Sensor entity**: Battery Voltage (mV)
-- **1x Sensor entity**: Rainfall total with automatic updates
-- **1x Number entity**: Sleep duration control (60-7200 seconds)
-- **LED Control**: ⚠️ **No longer available** - LED operates only during boot/join sequence
+- **6x Sensor entities**: 
+  - Temperature (Environmental + DS18B20 external probe)
+  - Humidity
+  - Pressure  
+  - Battery Percentage
+  - Wind Speed
+  - Wind Direction (0-360° compass bearing)
+  - Light Level (lux)
+- **2x Sensor entities**: 
+  - Battery Voltage (mV)
+  - Rainfall total (mm) with automatic updates
+- **LED Control**: ⚠️ **Not available in v2.0** - LED operates only during boot/join sequence
+
+### Endpoint Summary for Home Assistant
+
+| Endpoint | Entity Type | Measurements | Update Frequency |
+|----------|-------------|--------------|------------------|
+| 1 | Sensor | Temp, Humidity, Pressure, Battery | Configurable (default 15min) |
+| 2 | Sensor | Rainfall total (mm) | On rain detection (1mm threshold) |
+| 3 | Sensor | External temperature (DS18B20) | Configurable (default 15min) |
+| 4 | Sensor | Wind speed | Configurable (default 15min) |
+| 5 | Sensor | Wind direction (0-360°) | Configurable (default 15min) |
+| 6 | Sensor | Light level (lux) | Configurable (default 15min) |
 
 ### Zigbee2MQTT Integration
 
 A custom external converter is provided for full feature support with Zigbee2MQTT. See [ZIGBEE2MQTT_CONVERTER.md](ZIGBEE2MQTT_CONVERTER.md) for:
 - Converter installation instructions
 - Multi-endpoint support configuration
-- Sleep duration control setup
+- v2.0 endpoint mappings (6 endpoints)
 - Home Assistant automation examples
+
+**Note**: v2.0 requires updated converter due to new endpoint structure (6 endpoints vs 4 in v1.0)
+
+## 🔄 Migration Guide: v1.0 → v2.0
+
+### Hardware Requirements
+⚠️ **v2.0 firmware requires v2.0 hardware** - GPIO assignments are completely different.
+
+| Component | v1.0 | v2.0 | Compatible? |
+|-----------|------|------|-------------|
+| Target | ESP32-H2 or C6 | ESP32-H2 only | ❌ Different GPIO |
+| I2C Bus | Single (GPIO10/11) | Dual (GPIO10/11 + GPIO1/2) | ⚠️ Partial |
+| Rain Gauge | GPIO12 (H2), GPIO5 (C6) | GPIO12 only | ✅ H2 compatible |
+| Pulse Counter | GPIO13 | Removed | ❌ Deprecated |
+| Anemometer | N/A | GPIO14 | ➕ New |
+| DS18B20 | N/A | GPIO24 | ➕ New |
+| Battery MOSFET | N/A | GPIO3 | ➕ New |
+
+### Firmware Migration
+```bash
+# Clone v2.0 repository
+git clone https://github.com/Fabiancrg/caelum.git
+cd caelum
+
+# Set target (ESP32-H2 only for v2.0)
+idf.py set-target esp32h2
+
+# Build and flash
+idf.py -p [PORT] erase-flash
+idf.py -p [PORT] flash monitor
+```
+
+### What Changes?
+**Removed Features**:
+- ❌ Pulse counter endpoint (GPIO13) - use dedicated anemometer instead
+- ❌ Sleep configuration endpoint - replaced by sensor-specific intervals
+- ❌ Remote LED control - LED only operates during boot/join
+
+**New Features**:
+- ✅ DS18B20 external temperature probe (waterproof)
+- ✅ Wind speed measurement (anemometer on GPIO14)
+- ✅ Wind direction (AS5600 magnetic sensor, 0-360°)
+- ✅ Ambient light sensor (VEML7700, 0.0036-120k lux)
+- ✅ Dual I2C buses eliminate address conflicts
+- ✅ Battery MOSFET control for active power management
+
+### Zigbee2MQTT Converter Update
+v2.0 requires a new external converter due to endpoint changes:
+```javascript
+// Update your external converter to v2.0 format
+// See ZIGBEE2MQTT_CONVERTER.md for full v2.0 converter code
+```
+
+### Home Assistant Entity Changes
+| v1.0 Entity | v2.0 Entity | Notes |
+|-------------|-------------|-------|
+| `sensor.temp` | `sensor.temp` (EP1) | ✅ Compatible |
+| `sensor.humidity` | `sensor.humidity` (EP1) | ✅ Compatible |
+| `sensor.pressure` | `sensor.pressure` (EP1) | ✅ Compatible |
+| `sensor.rainfall` | `sensor.rainfall` (EP2) | ✅ Compatible |
+| `sensor.battery` | `sensor.battery` (EP1) | ✅ Compatible |
+| `number.sleep_duration` | Removed | ❌ Not in v2.0 |
+| `switch.led` | Removed | ❌ Boot-only in v2.0 |
+| N/A | `sensor.temp_external` (EP3) | ➕ New (DS18B20) |
+| N/A | `sensor.wind_speed` (EP4) | ➕ New (Anemometer) |
+| N/A | `sensor.wind_direction` (EP5) | ➕ New (AS5600) |
+| N/A | `sensor.light_level` (EP6) | ➕ New (VEML7700) |
+
+### I2C Sensor Compatibility
+v1.0 sensors on single I2C bus CAN be used on v2.0 Bus 1 (GPIO10/11):
+- ✅ BME280 / BMP280 / SHT41 / AHT20 work on Bus 1
+- ➕ Add AS5600 + VEML7700 on Bus 2 (GPIO1/2) for full functionality
+- ⚠️ Some I2C addresses may conflict if all sensors on same bus
 
 ### Device Information
 - **Manufacturer**: ESPRESSIF
@@ -628,13 +789,34 @@ This project follows dual licensing:
 
 ## 🔄 Based On
 
-This project is derived from ESP32 Zigbee SDK examples and implements a 4-endpoint architecture optimized for battery-powered weather station applications with:
-- Remote sleep duration configuration (Endpoint 3)
-- LED debug status indicator with remote control (Endpoint 4)
-- Deep sleep power management with network retry logic
-- Extended wake time during Zigbee join process (60 seconds)
-- RTC GPIO wake-up support for rain detection on both ESP32-H2 and ESP32-C6
-- Optimized battery monitoring with 98% power reduction
+This project is derived from ESP32 Zigbee SDK examples and implements a professional weather station architecture with:
+
+**v2.0 Architecture (Current)**:
+- 6-endpoint design (ENV, RAIN, DS18B20, WIND_SPEED, WIND_DIR, LIGHT)
+- Dual I2C buses (Bus 1: GPIO10/11, Bus 2: GPIO1/2) for expanded sensor support
+- DS18B20 1-Wire external temperature probe (GPIO24)
+- Dedicated rain gauge (GPIO12) and anemometer (GPIO14) inputs
+- AS5600 magnetic wind direction sensor (12-bit, 0-360°)
+- VEML7700 ambient light sensor (0.0036-120k lux range)
+- Optional DPS368 high-precision pressure sensor
+- Battery MOSFET control (GPIO3) for active power management
+- Automatic light sleep with 7.5s keep-alive polling
+- Ultra-low power: 0.68mA sleep current
+
+**v1.0 Architecture (Legacy)**:
+- 4-endpoint design (ENV, RAIN, PULSE_COUNTER, SLEEP_CONFIG)
+- Single I2C bus (GPIO10/11 on H2, GPIO6/7 on C6)
+- General-purpose pulse counter (GPIO13)
+- Remote sleep duration configuration
+- Available in `caelum-weatherstation` repository
+
+**Key Improvements in v2.0**:
+- ✅ Eliminated I2C address conflicts with dual-bus architecture
+- ✅ Added professional weather sensors (wind speed, direction, light)
+- ✅ DS18B20 waterproof probe for external temperature monitoring
+- ✅ Dedicated GPIO for each measurement type (no multiplexing)
+- ✅ Removed generic pulse counter - replaced with specific sensors
+- ✅ Enhanced battery management with MOSFET control
 
 ## 🤝 Contributing
 
@@ -655,16 +837,19 @@ If you find this project useful, consider supporting the development:
 ---
 
 **Project**: Caelum - ESP32 Zigbee Weather Station  
-**Version**: Managed via CMakeLists.txt (PROJECT_VER, BUILD_NUMBER)  
-**Compatible**: ESP32-C6, ESP32-H2, ESP-IDF v5.5.1+  
+**Version**: v2.0 - Hardware redesign with dual I2C buses and expanded sensor array  
+**Compatible**: ESP32-H2 (v2.0), ESP32-C6 (v1.0 legacy), ESP-IDF v5.5.1+  
 **License**: GPL v3 (Software) / CC BY-NC-SA 4.0 (Hardware)  
 **Features**: 
-- 4-endpoint design (sensors, rain, sleep config, LED debug)
-- Remote sleep configuration and LED control via Zigbee
+- 6-endpoint design (ENV, RAIN, DS18B20, WIND_SPEED, WIND_DIR, LIGHT)
+- Dual I2C buses for expanded sensor support without address conflicts
+- Professional weather monitoring (temperature, humidity, pressure, rain, wind, light)
+- DS18B20 waterproof external temperature probe
+- AS5600 magnetic wind direction sensor (0-360°)
+- VEML7700 ambient light sensor (0.0036-120k lux)
+- Anemometer wind speed measurement
 - OTA firmware updates
-- RTC GPIO wake-up for rain detection
-- Optimized battery monitoring (~98% power reduction)
-- Time-based hourly intervals with NVS persistence
-- WS2812 RGB LED status indicator (optional)
-- 10.9 year battery life (2500mAh, 15-min intervals)
+- Optimized battery monitoring with hourly time-based intervals
+- WS2812 RGB LED status indicator during boot/join
+- Ultra-low power: 0.68mA sleep current for extended battery life
 
